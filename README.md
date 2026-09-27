@@ -9,6 +9,29 @@ Vendor sources are the git submodule `robot_control/adeept_rasptank2`, pinned to
 - `anx_web_entry.py` — `/health` + starts the MQTT bridge
 - `anx_bridge/` — MQTT subscribe/publish + USB/MQTT controller mapping
 
+## Standalone
+
+Run the overlay on its own. Leave the vendor submodule `robot_control/adeept_rasptank2` at the public Adeept pin. `robot_control/anx-robot/` extends that tree with MQTT and a USB game controller; it loads vendor `app.py` and does not patch vendor files.
+
+```bash
+# Vendor pin. Skip when robot_control/adeept_rasptank2 is already checked out.
+git clone https://github.com/adeept/adeept_rasptank2.git robot_control/adeept_rasptank2
+git -C robot_control/adeept_rasptank2 checkout f5fe667
+
+cp .env.example .env
+# ANX_BRIDGE_ENABLED=true
+# ANX_CONTROL_SOURCE=auto   # USB gamepad when plugged in, otherwise MQTT
+# MQTT_BROKER=mqtt://127.0.0.1:1883
+# ANX_MQTT_INSECURE=true    # local plaintext broker only
+
+pip install -r robot_control/anx-robot/requirements-bridge.txt
+python robot_control/anx-robot/anx_web_entry.py
+```
+
+A USB gamepad uses the Xbox map in `robot_control/anx-robot/anx_bridge/controller_map.xbox.json` (`evdev`, `/dev/input`). MQTT clients publish on `{ANX_TOPIC_PREFIX}/controller/+` — see [MQTT_CONTROLLER_CONTRACT.md](./MQTT_CONTROLLER_CONTRACT.md). Check `http://127.0.0.1:5000/health`.
+
+Joining the ANX IPC Mosquitto stack is below.
+
 ## Deploy order (prerequisite)
 
 MQTT join needs the IPC broker and CA **before** this sidecar. This is an ops order requirement, not a missing Docker image:

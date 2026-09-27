@@ -1,0 +1,9 @@
+.env
+robot_control/adeept_rasptank2/web/.env
+docker-compose.override.yml
+*.local
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+robot_control/anx-robot/.pytest_cache/

@@ -1,0 +1,16 @@
+[Unit]
+Description=ANX RaspTank robot sidecar (Flask overlay + optional MQTT bridge)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/anx-robot
+EnvironmentFile=/opt/anx-robot/.env
+Environment=ANX_ROBOT_WEB_DIR=/opt/anx-robot/robot_control/adeept_rasptank2/web
+ExecStart=/usr/bin/python3 /opt/anx-robot/robot_control/anx-robot/anx_web_entry.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

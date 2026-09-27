@@ -1,0 +1,22 @@
+{
+  "deadzone": 0.15,
+  "axes": {
+    "ABS_Y": { "negative": "forward", "positive": "backward", "speed": true },
+    "ABS_X": { "negative": "left", "positive": "right" },
+    "ABS_RY": { "negative": "up", "positive": "down" },
+    "ABS_RX": { "negative": "lookleft", "positive": "lookright" },
+    "ABS_RZ": { "positive": "armUp" },
+    "ABS_Z": { "positive": "armDown" },
+    "ABS_HAT0X": { "negative": "lookleft", "positive": "lookright" }
+  },
+  "buttons": {
+    "BTN_TR": "handUp",
+    "BTN_TL": "handDown",
+    "BTN_SOUTH": "grab",
+    "BTN_EAST": "loose",
+    "BTN_WEST": "trackLine",
+    "BTN_NORTH": "automatic",
+    "BTN_START": "home",
+    "BTN_SELECT": "allStop"
+  }
+}

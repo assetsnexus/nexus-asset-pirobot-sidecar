@@ -1,6 +1,6 @@
 """GPIO / I2C sensor sampling for the overlay (imports vendor-style libs; no vendor edits).
 
-Ultrasonic: GPIO 23 trigger / 24 echo, max 2 m → millimetres.
+Ultrasonic: GPIO 23 trigger / 24 echo, max 2 m → millimetres, timed from lgpio echo edges.
 Battery: ADS7830 I2C 0x48 ch0, volts = raw/65535*8.4.
 Line IR: GPIO 17 (right) / 27 (middle) / 22 (left).
 """
@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,9 @@ def ensure_pin_factory() -> None:
 ULTRA_TRIGGER = 23
 ULTRA_ECHO = 24
 ULTRA_MAX_M = 2.0
+# Round-trip speed of sound: 343 m/s → 0.1715 mm per echo microsecond.
+_ULTRA_MM_PER_US = 0.1715
+_ULTRA_MIN_PULSE_US = 80
 
 LINE_LEFT_GPIO = 22
 LINE_MIDDLE_GPIO = 27
@@ -40,6 +45,80 @@ LINE_RIGHT_GPIO = 17
 BATTERY_I2C_ADDR = 0x48
 BATTERY_FULL_V = 8.4
 BATTERY_EMPTY_V = 6.0
+
+
+class _HcSr04:
+    """HC-SR04 range from lgpio echo edges.
+
+    gpiozero's DistanceSensor warns unless the pin factory is pigpio. pigpio
+    times pins by DMA on the old SoC GPIO block and does not run on the Pi 5
+    RP1. lgpio timestamps the echo edges from the kernel, which is the timed
+    path on this board.
+    """
+
+    def __init__(self, trigger: int, echo: int, max_m: float) -> None:
+        import lgpio
+
+        self._lgpio = lgpio
+        chip = 4 if os.path.exists("/dev/gpiochip4") else 0
+        self._handle = lgpio.gpiochip_open(chip)
+        if self._handle < 0:
+            raise RuntimeError(f"gpiochip_open({chip}) failed: {self._handle}")
+        lgpio.gpio_claim_output(self._handle, trigger, 0)
+        lgpio.gpio_claim_alert(self._handle, echo, lgpio.BOTH_EDGES)
+        self._trigger = trigger
+        self._max_mm = max_m * 1000.0
+        self._timeout_s = (self._max_mm / _ULTRA_MM_PER_US) / 1_000_000.0 + 0.02
+        self._lock = threading.Lock()
+        self._measure = threading.Lock()
+        self._done = threading.Event()
+        self._armed = False
+        self._rise_us: Optional[int] = None
+        self._width_us: Optional[int] = None
+        self._callback = lgpio.callback(self._handle, echo, lgpio.BOTH_EDGES, self._on_edge)
+
+    def _on_edge(self, _chip: int, _gpio: int, level: int, tick: int) -> None:
+        if level == 2:
+            return
+        with self._lock:
+            if not self._armed:
+                return
+            if level == 1 and self._rise_us is None:
+                self._rise_us = tick
+                return
+            if level == 0 and self._rise_us is not None:
+                width = (tick - self._rise_us) & 0xFFFFFFFF
+                self._rise_us = None
+                if width < _ULTRA_MIN_PULSE_US:
+                    return
+                self._width_us = width
+                self._armed = False
+                self._done.set()
+
+    def distance_mm(self) -> Optional[float]:
+        with self._measure:
+            return self._read_mm()
+
+    def _read_mm(self) -> Optional[float]:
+        with self._lock:
+            self._rise_us = None
+            self._width_us = None
+            self._armed = True
+            self._done.clear()
+        lg = self._lgpio
+        lg.gpio_write(self._handle, self._trigger, 0)
+        time.sleep(2e-6)
+        lg.gpio_write(self._handle, self._trigger, 1)
+        time.sleep(10e-6)
+        lg.gpio_write(self._handle, self._trigger, 0)
+        if not self._done.wait(self._timeout_s):
+            with self._lock:
+                self._armed = False
+            return self._max_mm
+        width = self._width_us
+        if width is None:
+            return None
+        return min(self._max_mm, width * _ULTRA_MM_PER_US)
 
 
 class SensorSuite:
@@ -76,19 +155,12 @@ class SensorSuite:
 
     def _setup_ultrasonic(self) -> None:
         try:
-            import warnings
-
-            from gpiozero import DistanceSensor
-
-            # Software timing is the container path. pigpio would need a host daemon.
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message="For more accurate readings, use the pigpio pin factory.*",
-                )
-                self._ultra = DistanceSensor(
-                    echo=ULTRA_ECHO, trigger=ULTRA_TRIGGER, max_distance=ULTRA_MAX_M
-                )
+            self._ultra = _HcSr04(ULTRA_TRIGGER, ULTRA_ECHO, ULTRA_MAX_M)
+            logger.info(
+                "ultrasonic HC-SR04 trigger=%s echo=%s lgpio edge timing",
+                ULTRA_TRIGGER,
+                ULTRA_ECHO,
+            )
         except Exception as exc:
             logger.debug("ultrasonic unavailable: %s", exc)
 
@@ -121,9 +193,7 @@ class SensorSuite:
         if self._ultra is None:
             return None
         try:
-            # gpiozero DistanceSensor.distance is metres (0 .. max_distance).
-            metres = float(self._ultra.distance)
-            return metres * 1000.0
+            return self._ultra.distance_mm()
         except Exception:
             return None
 

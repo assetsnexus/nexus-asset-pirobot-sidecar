@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 from typing import Any, Optional
 
@@ -25,56 +26,80 @@ logger = logging.getLogger(__name__)
 _LED_GPIO = {1: 9, 2: 25, 3: 11}
 
 
-def _set_gpio_function(gpios: list[int]) -> None:
-    """GPIO 9 and 11 are SPI0 MISO and SCLK. While SPI owns them the kernel returns EINVAL."""
+def _claim_output_quiet(lgpio: Any, handle: int, gpio: int, level: int) -> None:
+    """lgpio prints xGpioHandleRequest to stderr before raising."""
+    saved = os.dup(sys.stderr.fileno())
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            os.dup2(devnull.fileno(), sys.stderr.fileno())
+            lgpio.gpio_claim_output(handle, gpio, level)
+    finally:
+        os.dup2(saved, sys.stderr.fileno())
+        os.close(saved)
+
+
+def _pinctrl_level(gpio: int, level: int) -> bool:
+    """Drive a header GPIO by writing the pad registers.
+
+    GPIO 9 and 11 are SPI0 MISO and SCLK. The kernel answers a GPIO line
+    request with EINVAL, so lgpio cannot own them. pinctrl still sets the
+    pad, which is how the HAT LEDs on those pins are switched.
+    """
     pinctrl = shutil.which("pinctrl")
     if pinctrl is None:
-        logger.warning("pinctrl is not installed; SPI may still own GPIO 9 and 11")
-        return
-    for gpio in gpios:
-        proc = subprocess.run(
-            [pinctrl, "set", str(gpio), "op", "pn"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout).strip()
-            logger.warning("pinctrl set %s op pn failed: %s", gpio, detail)
+        logger.warning("pinctrl is not installed; GPIO %s stays unclaimed", gpio)
+        return False
+    proc = subprocess.run(
+        [pinctrl, "set", str(gpio), "op", "pn", "dh" if level else "dl"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        logger.warning("pinctrl set %s failed: %s", gpio, detail)
+        return False
+    return True
 
 
 class _DirectLeds:
-    """Drive the HAT LEDs with lgpio.
-
-    GPIO 9 and 11 are SPI0 pins. Claim them as GPIO outputs before lgpio
-    requests the line, otherwise the kernel returns EINVAL.
-    """
+    """Drive the HAT LEDs. lgpio for lines the kernel will grant, pinctrl otherwise."""
 
     def __init__(self) -> None:
         import lgpio
 
         self._lgpio = lgpio
         chip = 4 if os.path.exists("/dev/gpiochip4") else 0
-        _set_gpio_function(list(_LED_GPIO.values()))
         self._handle = lgpio.gpiochip_open(chip)
         if self._handle < 0:
             raise RuntimeError(f"gpiochip_open({chip}) failed: {self._handle}")
         self._pins: dict[int, int] = {}
+        self._pad_pins: dict[int, int] = {}
         for port, gpio in _LED_GPIO.items():
             try:
-                lgpio.gpio_claim_output(self._handle, gpio, 0)
+                _claim_output_quiet(lgpio, self._handle, gpio, 0)
                 self._pins[port] = gpio
             except Exception as exc:
-                logger.warning("LED port %s GPIO %s unavailable: %s", port, gpio, exc)
-        if not self._pins:
+                if _pinctrl_level(gpio, 0):
+                    self._pad_pins[port] = gpio
+                    logger.info(
+                        "LED port %s GPIO %s via pinctrl (gpiolib: %s)", port, gpio, exc
+                    )
+                else:
+                    logger.warning("LED port %s GPIO %s unavailable: %s", port, gpio, exc)
+        if not self._pins and not self._pad_pins:
             raise RuntimeError("no LED GPIO lines claimed")
 
     def switch(self, port: int, status: int) -> None:
         gpio = self._pins.get(port)
-        if gpio is None:
+        if gpio is not None:
+            self._lgpio.gpio_write(self._handle, gpio, 1 if status else 0)
+            return
+        pad = self._pad_pins.get(port)
+        if pad is None:
             logger.info("LED port %s is not claimed", port)
             return
-        self._lgpio.gpio_write(self._handle, gpio, 1 if status else 0)
+        _pinctrl_level(pad, 1 if status else 0)
 
 
 def _quiet_servo_prints(servo_cls: type) -> None:

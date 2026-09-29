@@ -16,6 +16,12 @@ def build_telemetry(
     host = host or {}
     sensors = sensors or {}
     state = state or {}
+    ultra_mm = sensors.get("ultrasonic_mm")
+    if ultra_mm is None:
+        ultra_mm = sensors.get("distance_mm")
+    ultra_cm = sensors.get("ultrasonic_distance_cm")
+    if ultra_cm is None and ultra_mm is not None:
+        ultra_cm = float(ultra_mm) / 10.0
     return {
         "cpu_temp_c": host.get("cpu_temp_c"),
         "gpu_temp_c": host.get("gpu_temp_c"),
@@ -24,10 +30,15 @@ def build_telemetry(
         "swap_percent": host.get("swap_percent"),
         "battery_voltage_v": sensors.get("battery_voltage_v"),
         "battery_percent": sensors.get("battery_percent"),
-        "ultrasonic_distance_cm": sensors.get("ultrasonic_distance_cm"),
+        "ultrasonic_distance_cm": ultra_cm,
+        "ultrasonic_mm": ultra_mm,
+        "distance_mm": sensors.get("distance_mm", ultra_mm),
         "line_left": sensors.get("line_left"),
         "line_middle": sensors.get("line_middle"),
         "line_right": sensors.get("line_right"),
+        "speed_mps": state.get("speed_mps", 0.0),
+        "distance_m": state.get("distance_m", 0.0),
+        "odometry_source": state.get("odometry_source", "open_loop_pwm"),
         "motor_left_speed": state.get("motor_left_speed", 0),
         "motor_right_speed": state.get("motor_right_speed", 0),
         "drive_direction": state.get("drive_direction", "stop"),

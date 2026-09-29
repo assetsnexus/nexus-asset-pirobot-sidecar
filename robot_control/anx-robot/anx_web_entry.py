@@ -83,9 +83,12 @@ def _start_anx_bridge() -> None:
     log = logging.getLogger("anx_web_entry")
     try:
         from anx_bridge import start_bridge
+        from anx_bridge.config import BridgeConfig
         from anx_bridge.hardware import HardwareExecutor, build_sample_fn
 
-        start_bridge(executor=HardwareExecutor(), sample=build_sample_fn())
+        cfg = BridgeConfig.from_env()
+        executor = HardwareExecutor(motion_config=cfg.motion)
+        start_bridge(config=cfg, executor=executor, sample=build_sample_fn(executor))
     except Exception as exc:
         log.warning("ANX bridge not started: %s", exc)
 

@@ -1,8 +1,12 @@
 """Unit tests for the ANX overlay MQTT bridge (no broker / GPIO required)."""
 from __future__ import annotations
 
+import json
+import math
 import os
 import sys
+import threading
+import time
 
 import pytest
 
@@ -10,7 +14,7 @@ _OVERLAY = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, _OVERLAY)
 
 from anx_bridge.command_router import CommandRouter
-from anx_bridge.config import BridgeConfig, BridgeConfigError
+from anx_bridge.config import BridgeConfig, BridgeConfigError, OverlayMotionConfig
 from anx_bridge.controller_input import (
     ABS_X,
     BTN_SOUTH,
@@ -22,7 +26,15 @@ from anx_bridge.controller_input import (
     select_source,
 )
 from anx_bridge.deadman import Deadman
+from anx_bridge.motion import DEFAULT_SEQUENCE, MotionController
 from anx_bridge.mqtt_bridge import MqttBridge
+from anx_bridge.odometry import (
+    drive_duration_s,
+    speed_mps,
+    turn_90_duration_s,
+    wheel_circumference_m,
+)
+from anx_bridge.sensors import SensorSuite
 from anx_bridge.telemetry import build_telemetry
 
 
@@ -32,6 +44,16 @@ def test_router_known_and_stop():
     assert not r.execute("nope")
     r.all_stop()
     assert ("DS", None) in r.calls
+
+
+def test_router_accepts_motion_actions():
+    r = CommandRouter()
+    assert r.execute("turn_left_90")
+    assert r.execute("drive_cm", 50)
+    assert r.execute("drive_sequence", steps=DEFAULT_SEQUENCE)
+    assert r.execute("police")
+    assert r.execute("police_off")
+    assert r.execute("stop")
 
 
 def test_deadzone_and_axis():
@@ -64,11 +86,56 @@ def test_deadman_trips():
     assert ("DS", None) in r.calls
 
 
+def test_deadman_skips_during_timed_motion():
+    r = CommandRouter()
+    d = Deadman(r, 500)
+    d.last_input = 0
+    d.set_timed_motion_active(True)
+    assert not d.tick(now=1.0)
+    assert d.trips == 0
+    d.set_timed_motion_active(False)
+    assert d.tick(now=1.0)
+    assert d.trips == 1
+
+
+def test_deadman_node_heartbeat_suppresses_quiet_trip():
+    r = CommandRouter()
+    d = Deadman(r, 500, node_heartbeat_timeout_ms=2000)
+    d.last_input = 0
+    d.poke_node_heartbeat()
+    # Quiet MQTT would trip, but heartbeat is fresh.
+    assert not d.tick(now=d.last_node_heartbeat + 0.1)
+    # Heartbeat stale → failsafe stop.
+    assert d.tick(now=d.last_node_heartbeat + 3.0)
+    assert d.trips == 1
+
+
 def test_telemetry_shape():
-    body = build_telemetry(control_source="mqtt", deadman_trips=2)
+    body = build_telemetry(
+        control_source="mqtt",
+        deadman_trips=2,
+        sensors={"ultrasonic_mm": 250.0, "battery_voltage_v": 7.8, "battery_percent": 75.0},
+        state={"speed_mps": 0.1, "distance_m": 1.2, "odometry_source": "open_loop_pwm"},
+    )
     assert body["control_source"] == "mqtt"
     assert body["deadman_trips_total"] == 2
     assert "ultrasonic_distance_cm" in body
+    assert body["ultrasonic_mm"] == 250.0
+    assert body["distance_mm"] == 250.0
+    assert body["speed_mps"] == 0.1
+    assert body["distance_m"] == 1.2
+    assert body["odometry_source"] == "open_loop_pwm"
+    assert body["battery_voltage_v"] == 7.8
+
+
+def test_wheel_circumference_and_turn_time():
+    circ = wheel_circumference_m(0.045)
+    assert circ == pytest.approx(math.pi * 0.045)
+    v = speed_mps(100, 0.35)
+    assert v == pytest.approx(0.35)
+    t = turn_90_duration_s(0.12, 0.35)
+    assert t == pytest.approx((math.pi / 2.0) * (0.12 / 2.0) / 0.35)
+    assert drive_duration_s(1.0, 0.35) == pytest.approx(1.0 / 0.35)
 
 
 def test_mqtt_cmd():
@@ -82,6 +149,194 @@ def test_mqtt_cmd():
     assert r.last_action == "forward"
     bridge.publish_telemetry({"cpu_percent": 1})
     assert published[0][0].endswith("/telemetry")
+
+
+def test_mqtt_drive_sequence_passes_steps():
+    seen = []
+
+    def exec_fn(action, value=None, steps=None):
+        seen.append((action, value, steps))
+
+    r = CommandRouter(exec_fn)
+    cfg = BridgeConfig.from_env({"ANX_BRIDGE_ENABLED": "true", "ANX_ASSET_ID": "a1"})
+    bridge = MqttBridge(cfg, r, publish=lambda *args: None)
+    steps = [{"action": "drive_cm", "value": 100}, {"action": "turn_right_90"}]
+    bridge.on_message(
+        "anx/asset/a1/cmd",
+        json.dumps({"action": "drive_sequence", "steps": steps}),
+    )
+    assert seen[-1][0] == "drive_sequence"
+    assert seen[-1][2] == steps
+
+
+def test_mqtt_telemetry_fast_topic():
+    cfg = BridgeConfig.from_env({"ANX_BRIDGE_ENABLED": "true", "ANX_TOPIC_PREFIX": "rasptank"})
+    published = []
+    bridge = MqttBridge(cfg, CommandRouter(), publish=lambda t, p, retain: published.append(t))
+    bridge.publish_telemetry_fast({"ultrasonic_mm": 80})
+    assert published[0] == "rasptank/telemetry_fast"
+
+
+def test_mqtt_node_heartbeat():
+    poked = []
+    cfg = BridgeConfig.from_env({"ANX_BRIDGE_ENABLED": "true", "ANX_TOPIC_PREFIX": "rasptank"})
+    bridge = MqttBridge(
+        cfg,
+        CommandRouter(),
+        publish=lambda *a: None,
+        on_node_heartbeat=lambda: poked.append(1),
+    )
+    bridge.on_message("rasptank/node_heartbeat", "{}")
+    assert poked == [1]
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def sleep(self, dt: float) -> None:
+        self.t += max(0.0, float(dt))
+
+
+def _wait_motion(motion: MotionController, timeout: float = 2.0) -> None:
+    deadline = time.time() + timeout
+    while motion.active and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.02)
+
+
+def test_motion_sequence_order():
+    clock = _FakeClock()
+    events: list[str] = []
+    ultra = {"mm": 500.0}
+
+    motion = MotionController(
+        drive_forward=lambda pwm: events.append(f"fwd:{pwm}"),
+        drive_backward=lambda pwm: events.append(f"back:{pwm}"),
+        spin_left=lambda pwm: events.append(f"left:{pwm}"),
+        spin_right=lambda pwm: events.append(f"right:{pwm}"),
+        motor_stop=lambda: events.append("stop"),
+        get_pwm=lambda: 100,
+        read_ultrasonic_mm=lambda: ultra["mm"],
+        set_speed_mps=lambda v: None,
+        accumulate_distance=lambda v, dt: None,
+        track_width_m=0.12,
+        speed_at_full_pwm_mps=0.35,
+        obstacle_stop_mm=100.0,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    steps = [
+        {"action": "drive_cm", "value": 10},
+        {"action": "turn_right_90"},
+        {"action": "drive_cm", "value": 20},
+        {"action": "turn_left_90"},
+    ]
+    motion.start_sequence(steps)
+    _wait_motion(motion)
+    drive_events = [e for e in events if e != "stop"]
+    assert drive_events == ["fwd:100", "right:100", "fwd:100", "left:100"]
+    assert events[-1] == "stop"
+
+
+def test_motion_obstacle_stop_at_100mm():
+    clock = _FakeClock()
+    events: list[str] = []
+    speeds: list[float] = []
+    ultra = {"mm": 50.0}  # below 100 mm threshold
+
+    motion = MotionController(
+        drive_forward=lambda pwm: events.append("fwd"),
+        drive_backward=lambda pwm: events.append("back"),
+        spin_left=lambda pwm: events.append("left"),
+        spin_right=lambda pwm: events.append("right"),
+        motor_stop=lambda: events.append("stop"),
+        get_pwm=lambda: 100,
+        read_ultrasonic_mm=lambda: ultra["mm"],
+        set_speed_mps=lambda v: speeds.append(v),
+        accumulate_distance=lambda v, dt: None,
+        track_width_m=0.12,
+        speed_at_full_pwm_mps=0.35,
+        obstacle_stop_mm=100.0,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    motion.start_drive_cm(200)
+    _wait_motion(motion)
+    assert motion.last_obstacle_stop is True
+    assert "fwd" in events
+    assert "stop" in events
+    assert 0.0 in speeds
+
+
+def test_stop_is_idempotent():
+    clock = _FakeClock()
+    stops = []
+    motion = MotionController(
+        drive_forward=lambda pwm: None,
+        drive_backward=lambda pwm: None,
+        spin_left=lambda pwm: None,
+        spin_right=lambda pwm: None,
+        motor_stop=lambda: stops.append(1),
+        get_pwm=lambda: 60,
+        read_ultrasonic_mm=lambda: 500.0,
+        set_speed_mps=lambda v: None,
+        accumulate_distance=lambda v, dt: None,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    motion.stop()
+    motion.stop()
+    assert len(stops) >= 2
+
+
+def test_new_motion_cancels_previous():
+    clock = _FakeClock()
+    started = threading.Event()
+    events: list[str] = []
+
+    def slow_sleep(dt: float) -> None:
+        started.set()
+        end = time.time() + min(dt, 0.3)
+        while time.time() < end:
+            time.sleep(0.01)
+            clock.t += 0.01
+
+    motion = MotionController(
+        drive_forward=lambda pwm: events.append("fwd"),
+        drive_backward=lambda pwm: None,
+        spin_left=lambda pwm: events.append("left"),
+        spin_right=lambda pwm: None,
+        motor_stop=lambda: events.append("stop"),
+        get_pwm=lambda: 100,
+        read_ultrasonic_mm=lambda: 500.0,
+        set_speed_mps=lambda v: None,
+        accumulate_distance=lambda v, dt: None,
+        speed_at_full_pwm_mps=0.05,
+        sleep_fn=slow_sleep,
+        monotonic_fn=time.monotonic,
+    )
+    motion.start_drive_cm(500)
+    assert started.wait(1.0)
+    motion.start_turn_left_90()
+    _wait_motion(motion)
+    assert "left" in events
+
+
+def test_sensor_suite_injectable():
+    suite = SensorSuite(
+        ultrasonic_mm_fn=lambda: 123.0,
+        battery_fn=lambda: (7.5, 62.5),
+        line_fn=lambda: (1, 0, 1),
+    )
+    sample = suite.sample()
+    assert sample["ultrasonic_mm"] == 123.0
+    assert sample["distance_mm"] == 123.0
+    assert sample["battery_voltage_v"] == 7.5
+    assert sample["line_left"] == 1
 
 
 def test_plaintext_mqtt_is_rejected():
@@ -110,6 +365,10 @@ def test_ipc_mqtt_broker_env():
     assert cfg.mqtt_password == "secret"
     assert cfg.mqtt_ca == "/certs/ca.crt"
     assert cfg.topic_prefix == "rasptank"
+    assert cfg.motion.wheel_diameter_m == 0.045
+    assert cfg.motion.track_width_m == 0.12
+    assert cfg.motion.speed_at_full_pwm_mps == 0.35
+    assert cfg.motion.obstacle_stop_mm == 100.0
 
 
 def test_default_url_is_tls():
@@ -208,6 +467,13 @@ def test_executor_receives_mqtt_command():
 def test_config_rejects_bad_source():
     with pytest.raises(BridgeConfigError):
         BridgeConfig.from_env({"ANX_CONTROL_SOURCE": "bluetooth"})
+
+
+def test_overlay_motion_config_defaults():
+    m = OverlayMotionConfig()
+    assert m.wheel_diameter_m == 0.045
+    assert m.track_width_m == 0.12
+    assert m.speed_at_full_pwm_mps == 0.35
 
 
 def test_bridge_disabled_is_noop():

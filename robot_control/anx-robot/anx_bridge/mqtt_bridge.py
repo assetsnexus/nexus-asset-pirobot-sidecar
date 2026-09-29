@@ -22,18 +22,25 @@ class MqttBridge:
         router: CommandRouter,
         publish: Optional[Callable[[str, str, bool], None]] = None,
         on_controller: Optional[Callable[[dict], None]] = None,
+        on_node_heartbeat: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self.router = router
         self._publish = publish or (lambda topic, payload, retain: None)
         self._on_controller = on_controller
+        self._on_node_heartbeat = on_node_heartbeat
         self.subscriptions = [
             f"{config.topic_prefix}/cmd",
             f"{config.topic_prefix}/controller/+",
+            f"{config.topic_prefix}/node_heartbeat",
         ]
 
     def on_message(self, topic: str, payload: str) -> None:
         prefix = self.config.topic_prefix
+        if topic == f"{prefix}/node_heartbeat" or topic.endswith("/node_heartbeat"):
+            if self._on_node_heartbeat is not None:
+                self._on_node_heartbeat()
+            return
         try:
             data = json.loads(payload) if payload else {}
         except json.JSONDecodeError:
@@ -45,7 +52,7 @@ class MqttBridge:
                 self.router.all_stop()
                 return
             if isinstance(action, str):
-                self.router.execute(action, data.get("value"))
+                self.router.execute(action, data.get("value"), steps=data.get("steps"))
             return
         if "/controller/" in topic and isinstance(data, dict):
             if self._on_controller is not None:
@@ -54,6 +61,9 @@ class MqttBridge:
 
     def publish_telemetry(self, body: dict[str, Any]) -> None:
         self._publish(f"{self.config.topic_prefix}/telemetry", json.dumps(body), False)
+
+    def publish_telemetry_fast(self, body: dict[str, Any]) -> None:
+        self._publish(f"{self.config.topic_prefix}/telemetry_fast", json.dumps(body), False)
 
     def publish_state(self, body: dict[str, Any]) -> None:
         self._publish(f"{self.config.topic_prefix}/state", json.dumps(body), True)

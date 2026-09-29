@@ -2,20 +2,31 @@
 
 When GPIO / HAT libraries are absent (compose dry-run, CI), actions are logged only.
 Mirrors webServer_HAT_V3.1 robotCtrl / switchCtrl without patching that file.
+Adds open-loop timed motion, sensor sampling, and WS2812 police lights in the overlay.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
+
+from .config import OverlayMotionConfig
+from .motion import MotionController
+from .odometry import speed_mps
+from .sensors import SensorSuite
 
 logger = logging.getLogger(__name__)
 
 
 class HardwareExecutor:
-    """Best-effort drive path using vendor move / switch / RPIservo."""
+    """Best-effort drive path using vendor move / switch / RPIservo / robotLight."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        motion_config: Optional[OverlayMotionConfig] = None,
+        sensors: Optional[SensorSuite] = None,
+    ) -> None:
         self._ready = False
         self._speed = 60
         self._direction = "no"
@@ -23,12 +34,34 @@ class HardwareExecutor:
         self._move = None
         self._switch = None
         self._sc = None  # RPIservo.ServoCtrl
+        self._ws2812 = None
+        self._ws2812_ready = False
         self._init_error: Optional[str] = None
+        self._motion_cfg = motion_config or OverlayMotionConfig()
+        self.sensors = sensors or SensorSuite()
+        self._distance_m = 0.0
+        self._speed_mps = 0.0
+        self._last_odom_t: Optional[float] = None
+        self._motion: Optional[MotionController] = None
+        self._deadman = None
+        self._publish_fast = None
+
+    def attach_runtime(self, deadman=None, publish_fast=None) -> None:
+        self._deadman = deadman
+        self._publish_fast = publish_fast
+        if self._motion is not None:
+            self._motion.attach(
+                set_timed_motion_active=(
+                    deadman.set_timed_motion_active if deadman is not None else None
+                ),
+                publish_fast=publish_fast,
+            )
 
     def setup(self) -> bool:
         if self._ready:
             return True
         if self._init_error is not None:
+            self._ensure_motion()
             return False
         try:
             import move
@@ -44,51 +77,180 @@ class HardwareExecutor:
             self._switch = switch
             self._sc = sc
             self._ready = True
+            self._setup_lights()
             logger.info("ANX hardware executor ready (vendor move/switch/RPIservo)")
+            self._ensure_motion()
             return True
         except Exception as exc:
             self._init_error = str(exc)
             logger.warning(
                 "ANX hardware executor unavailable (MQTT will log actions only): %s", exc
             )
+            self._ensure_motion()
             return False
 
-    def __call__(self, action: str, value: Any = None) -> None:
+    def _setup_lights(self) -> None:
+        try:
+            import robotLight
+
+            ws = None
+            if hasattr(robotLight, "Adeept_SPI_LedPixel"):
+                ws = robotLight.Adeept_SPI_LedPixel(16, 255)
+                if hasattr(ws, "check_spi_state") and ws.check_spi_state() == 0:
+                    ws.led_close()
+                    ws = None
+                elif hasattr(ws, "start"):
+                    ws.start()
+            if ws is None and hasattr(robotLight, "RobotWS2812"):
+                ws = robotLight.RobotWS2812()
+                if hasattr(ws, "start"):
+                    ws.start()
+            if ws is not None:
+                self._ws2812 = ws
+                self._ws2812_ready = True
+                if hasattr(ws, "breath"):
+                    ws.breath(70, 70, 255)
+        except Exception as exc:
+            logger.debug("WS2812 unavailable: %s", exc)
+            self._ws2812_ready = False
+
+    def _ensure_motion(self) -> MotionController:
+        if self._motion is not None:
+            return self._motion
+
+        def drive_forward(pwm: int) -> None:
+            self._direction = "forward"
+            self._apply_move(pwm, 1, "mid")
+
+        def drive_backward(pwm: int) -> None:
+            self._direction = "backward"
+            self._apply_move(pwm, -1, "no")
+
+        def spin_left(pwm: int) -> None:
+            self._turn = "left"
+            self._apply_move(pwm, 1, "left")
+
+        def spin_right(pwm: int) -> None:
+            self._turn = "right"
+            self._apply_move(pwm, 1, "right")
+
+        def motor_stop() -> None:
+            self._direction = "no"
+            self._turn = "no"
+            self._speed_mps = 0.0
+            if self._move is not None:
+                self._move.motorStop()
+
+        self._motion = MotionController(
+            drive_forward=drive_forward,
+            drive_backward=drive_backward,
+            spin_left=spin_left,
+            spin_right=spin_right,
+            motor_stop=motor_stop,
+            get_pwm=lambda: self._speed,
+            read_ultrasonic_mm=self.sensors.ultrasonic_mm,
+            set_speed_mps=self._set_speed_mps,
+            accumulate_distance=self._accumulate_distance,
+            set_timed_motion_active=(
+                self._deadman.set_timed_motion_active if self._deadman is not None else None
+            ),
+            publish_fast=self._publish_fast,
+            track_width_m=self._motion_cfg.track_width_m,
+            speed_at_full_pwm_mps=self._motion_cfg.speed_at_full_pwm_mps,
+            obstacle_stop_mm=self._motion_cfg.obstacle_stop_mm,
+        )
+        return self._motion
+
+    def _apply_move(self, pwm: int, direction: int, turn: str) -> None:
+        if self._move is not None:
+            self._move.move(pwm, direction, turn)
+        self._speed_mps = speed_mps(pwm, self._motion_cfg.speed_at_full_pwm_mps)
+        self._last_odom_t = time.monotonic()
+
+    def _set_speed_mps(self, v: float) -> None:
+        self._speed_mps = float(v)
+        if v == 0.0:
+            self._direction = "no"
+            self._turn = "no"
+
+    def _accumulate_distance(self, v: float, dt: float) -> None:
+        if dt > 0 and v:
+            self._distance_m += abs(v) * dt
+
+    def _tick_odometry(self) -> None:
+        now = time.monotonic()
+        if self._last_odom_t is not None and self._speed_mps and self._direction != "no":
+            # Only integrate continuous RC drive here; timed motion accumulates itself.
+            if self._motion is None or not self._motion.active:
+                self._distance_m += abs(self._speed_mps) * (now - self._last_odom_t)
+        self._last_odom_t = now
+
+    def __call__(self, action: str, value: Any = None, steps: Any = None) -> None:
+        if action in (
+            "turn_left_90",
+            "turn_right_90",
+            "drive_cm",
+            "drive_sequence",
+            "stop",
+            "police",
+            "police_off",
+        ):
+            self._handle_overlay_action(action, value, steps)
+            return
+
         if not self._ready and not self.setup():
             logger.info("robot action %s value=%s (no hardware)", action, value)
+            if action in ("forward", "backward", "left", "right"):
+                # Still track open-loop speed for dry-run telemetry.
+                self._update_drive_state(action)
+            elif action in ("DS", "TS"):
+                self._speed_mps = 0.0
+                if action == "DS":
+                    self._direction = "no"
+                if action == "TS":
+                    self._turn = "no"
+            elif action == "wsB":
+                self._set_pwm(value)
             return
+
         move = self._move
         switch = self._switch
         sc = self._sc
         assert move is not None and switch is not None and sc is not None
 
         if action == "wsB":
-            try:
-                self._speed = max(0, min(100, int(value)))
-            except (TypeError, ValueError):
-                pass
+            self._set_pwm(value)
             return
 
         if action == "forward":
             self._direction = "forward"
             move.move(self._speed, 1, "mid")
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
+            self._last_odom_t = time.monotonic()
         elif action == "backward":
             self._direction = "backward"
             move.move(self._speed, -1, "no")
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
+            self._last_odom_t = time.monotonic()
         elif action == "DS":
             self._direction = "no"
+            self._speed_mps = 0.0 if self._turn == "no" else self._speed_mps
             if self._turn == "no":
                 move.motorStop()
+                self._speed_mps = 0.0
         elif action == "left":
             self._turn = "left"
             move.move(self._speed, 1, "left")
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
         elif action == "right":
             self._turn = "right"
             move.move(self._speed, 1, "right")
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
         elif action == "TS":
             self._turn = "no"
             if self._direction == "no":
                 move.motorStop()
+                self._speed_mps = 0.0
         elif action == "armUp":
             sc.singleServo(0, 1, 2)
         elif action == "armDown":
@@ -137,9 +299,101 @@ class HardwareExecutor:
         else:
             logger.debug("hardware: unhandled action %s", action)
 
+    def _update_drive_state(self, action: str) -> None:
+        if action == "forward":
+            self._direction = "forward"
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
+        elif action == "backward":
+            self._direction = "backward"
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
+        elif action == "left":
+            self._turn = "left"
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
+        elif action == "right":
+            self._turn = "right"
+            self._speed_mps = speed_mps(self._speed, self._motion_cfg.speed_at_full_pwm_mps)
+        self._last_odom_t = time.monotonic()
 
-def build_sample_fn():
-    """Telemetry sample using vendor info.py when present."""
+    def _set_pwm(self, value: Any) -> None:
+        try:
+            self._speed = max(0, min(100, int(value)))
+        except (TypeError, ValueError):
+            pass
+
+    def _handle_overlay_action(self, action: str, value: Any, steps: Any) -> None:
+        # Ensure motion exists even without GPIO (dry-run / tests).
+        if not self._ready:
+            self.setup()
+        motion = self._ensure_motion()
+        if action == "stop":
+            motion.stop()
+            return
+        if action == "police":
+            self._police_on()
+            return
+        if action == "police_off":
+            self._police_off()
+            return
+        if action == "turn_left_90":
+            motion.start_turn_left_90()
+            return
+        if action == "turn_right_90":
+            motion.start_turn_right_90()
+            return
+        if action == "drive_cm":
+            motion.start_drive_cm(value)
+            return
+        if action == "drive_sequence":
+            motion.start_sequence(steps if isinstance(steps, list) else None)
+            return
+
+    def _police_on(self) -> None:
+        if not self._ws2812_ready:
+            self._setup_lights()
+        if self._ws2812 is not None and hasattr(self._ws2812, "police"):
+            try:
+                self._ws2812.police()
+                return
+            except Exception as exc:
+                logger.debug("police failed: %s", exc)
+        logger.info("robot action police (no WS2812)")
+
+    def _police_off(self) -> None:
+        if self._ws2812 is not None:
+            try:
+                if hasattr(self._ws2812, "breath"):
+                    self._ws2812.breath(70, 70, 255)
+                elif hasattr(self._ws2812, "pause"):
+                    self._ws2812.pause()
+                return
+            except Exception as exc:
+                logger.debug("police_off failed: %s", exc)
+        logger.info("robot action police_off (no WS2812)")
+
+    def odometry_state(self) -> dict[str, Any]:
+        self._tick_odometry()
+        drive = "stop"
+        if self._direction == "forward":
+            drive = "forward"
+        elif self._direction == "backward":
+            drive = "backward"
+        elif self._turn in ("left", "right"):
+            drive = self._turn
+        return {
+            "speed_mps": self._speed_mps,
+            "distance_m": self._distance_m,
+            "odometry_source": "open_loop_pwm",
+            "speed_setting": self._speed,
+            "drive_direction": drive,
+            "motor_left_speed": self._speed if drive != "stop" else 0,
+            "motor_right_speed": self._speed if drive != "stop" else 0,
+        }
+
+
+def build_sample_fn(executor: Optional[HardwareExecutor] = None):
+    """Telemetry sample using vendor info.py + overlay sensors / odometry."""
+
+    hw = executor
 
     def sample(control_source: str, deadman_trips: int) -> dict:
         from .telemetry import build_telemetry
@@ -155,10 +409,27 @@ def build_sample_fn():
             }
         except Exception:
             host = {}
+
+        sensors: dict = {}
+        state: dict = {}
+        if hw is not None:
+            try:
+                sensors = hw.sensors.sample()
+            except Exception:
+                sensors = {}
+            try:
+                state = hw.odometry_state()
+            except Exception:
+                state = {"odometry_source": "open_loop_pwm"}
+        else:
+            state = {"odometry_source": "open_loop_pwm"}
+
         return build_telemetry(
             control_source=control_source,
             deadman_trips=deadman_trips,
             host=host,
+            sensors=sensors,
+            state=state,
         )
 
     return sample

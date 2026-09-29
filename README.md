@@ -60,8 +60,8 @@ Web UI: `http://<pi>:5000` (password from `.env` / `ROBOT_CONTROL_PASSWORD`).
 1. Process entry is `robot_control/anx-robot/anx_web_entry.py` (Docker `CMD` / systemd `ExecStart`).
 2. It loads vendor `app.py` without modifying it, then calls `anx_bridge.start_bridge()` when `ANX_BRIDGE_ENABLED` is true/1/yes.
 3. Config reads **ipc** names first: `MQTT_BROKER`, `MQTT_USER`, `MQTT_PASSWORD`, `MQTT_CA_FILE` (aliases `ANX_MQTT_*` still work).
-4. Subscribes to `{ANX_TOPIC_PREFIX}/cmd` and `{ANX_TOPIC_PREFIX}/controller/+`, publishes `{prefix}/telemetry` and `{prefix}/availability`.
-5. Hardware commands go through an overlay executor that imports vendor `move` / `switch` / `RPIservo` when present; without GPIO the bridge still MQTT-connects and logs actions.
+4. Subscribes to `{ANX_TOPIC_PREFIX}/cmd`, `{ANX_TOPIC_PREFIX}/controller/+`, and `{prefix}/node_heartbeat`; publishes `{prefix}/telemetry` (~1 Hz), `{prefix}/telemetry_fast` (range ~20 Hz), and `{prefix}/availability`.
+5. Hardware commands go through an overlay executor that imports vendor `move` / `switch` / `RPIservo` / `robotLight` when present; without GPIO the bridge still MQTT-connects and logs actions. Timed motions (`drive_cm`, `turn_*_90`, `drive_sequence`) and open-loop odometry live only in `anx-robot/` (vendor tree untouched).
 
 ## Image publish (not done here)
 
@@ -83,7 +83,10 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_BRIDGE_ENABLED` | `true` to start the overlay MQTT bridge |
 | `ANX_CONTROL_SOURCE` | `auto` \| `usb` \| `mqtt` |
 | `ANX_TOPIC_PREFIX` | Default `rasptank` (blueprint topic prefix) |
-| `ANX_DEADMAN_MS` | Stop drive/servos after quiet input (default 500) |
+| `ANX_DEADMAN_MS` | Quiet-MQTT failsafe (default 500); gated during timed motion; suppressed while node heartbeats are fresh |
+| `ANX_NODE_HEARTBEAT_MS` | Node-heartbeat freshness window (default 2000); node owns session timers while fresh |
+| `ANX_OBSTACLE_STOP_MM` | Local ultrasonic stop threshold during timed motion (default 100) |
+| `ANX_WHEEL_DIAMETER_M` / `ANX_TRACK_WIDTH_M` / `ANX_SPEED_AT_FULL_PWM_MPS` | Open-loop odometry defaults `0.045` / `0.12` / `0.35` |
 | `IPC_DOCKER_NETWORK` | Must match ipc compose network name |
 
 ## Healthcheck

@@ -9,9 +9,26 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .odometry import (
+    DEFAULT_SPEED_AT_FULL_PWM_MPS,
+    DEFAULT_TRACK_WIDTH_M,
+    DEFAULT_WHEEL_DIAMETER_M,
+)
+
 
 class BridgeConfigError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class OverlayMotionConfig:
+    """Open-loop motion constants — overlay only, never written into the vendor tree."""
+
+    wheel_diameter_m: float = DEFAULT_WHEEL_DIAMETER_M
+    track_width_m: float = DEFAULT_TRACK_WIDTH_M
+    speed_at_full_pwm_mps: float = DEFAULT_SPEED_AT_FULL_PWM_MPS
+    obstacle_stop_mm: float = 100.0
+    node_heartbeat_timeout_ms: int = 2000
 
 
 @dataclass(frozen=True)
@@ -29,6 +46,7 @@ class BridgeConfig:
     control_source: str  # auto | usb | mqtt
     controller_map_path: str
     deadman_ms: int
+    motion: OverlayMotionConfig
 
     @classmethod
     def from_env(cls, environ: dict | None = None) -> "BridgeConfig":
@@ -45,6 +63,17 @@ class BridgeConfig:
             raise BridgeConfigError("ANX_DEADMAN_MS must be an integer") from exc
         if deadman < 50:
             raise BridgeConfigError("ANX_DEADMAN_MS must be >= 50")
+        motion = OverlayMotionConfig(
+            wheel_diameter_m=_float_env(env, "ANX_WHEEL_DIAMETER_M", DEFAULT_WHEEL_DIAMETER_M),
+            track_width_m=_float_env(env, "ANX_TRACK_WIDTH_M", DEFAULT_TRACK_WIDTH_M),
+            speed_at_full_pwm_mps=_float_env(
+                env, "ANX_SPEED_AT_FULL_PWM_MPS", DEFAULT_SPEED_AT_FULL_PWM_MPS
+            ),
+            obstacle_stop_mm=_float_env(env, "ANX_OBSTACLE_STOP_MM", 100.0),
+            node_heartbeat_timeout_ms=int(
+                float(env.get("ANX_NODE_HEARTBEAT_MS", "2000") or "2000")
+            ),
+        )
         insecure = env.get("ANX_MQTT_INSECURE", "").strip().lower() in ("1", "true", "yes")
         # Prefer ipc-docker names; fall back to Pi ANX_MQTT_* aliases.
         mqtt_url = (
@@ -82,7 +111,18 @@ class BridgeConfig:
             control_source=source,
             controller_map_path=env.get("ANX_CONTROLLER_MAP", default_map).strip() or default_map,
             deadman_ms=deadman,
+            motion=motion,
         )
+
+
+def _float_env(env: dict, key: str, default: float) -> float:
+    raw = env.get(key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise BridgeConfigError(f"{key} must be a number") from exc
 
 
 def parse_mqtt_url(url: str) -> tuple[str, str, int]:

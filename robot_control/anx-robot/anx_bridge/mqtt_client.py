@@ -60,6 +60,7 @@ class PahoSession:
         for topic in (
             f"{self.config.topic_prefix}/cmd",
             f"{self.config.topic_prefix}/controller/+",
+            f"{self.config.topic_prefix}/node_heartbeat",
         ):
             self.client.subscribe(topic)
         logger.info(

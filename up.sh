@@ -25,6 +25,11 @@ fi
 
 ./prepare.sh
 
+if [[ -z "$(grep -E '^MQTT_PASSWORD=' .env | head -1 | cut -d= -f2- | tr -d '\r\"')" ]]; then
+  echo "ERROR: MQTT_PASSWORD is still empty in .env" >&2
+  exit 1
+fi
+
 set_key() {
   local key="$1"
   local val="$2"

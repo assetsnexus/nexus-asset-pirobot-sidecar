@@ -52,6 +52,20 @@ set_key_in_file() {
   fi
 }
 
+# Read one KEY=value line. Do not source the edge .env: it is a Compose env
+# file, and a later line can abort `source` before MQTT_PASSWORD is copied.
+env_file_value() {
+  local file="$1"
+  local key="$2"
+  local line
+  line="$(grep -E "^${key}=" "$file" 2>/dev/null | head -1 || true)"
+  line="${line%%$'\r'}"
+  line="${line#"${key}="}"
+  line="${line#"\""}"
+  line="${line%"\""}"
+  printf '%s' "$line"
+}
+
 echo "==> ANX RaspTank sidecar prepare"
 
 if [[ ! -f .env ]]; then
@@ -63,25 +77,22 @@ fi
 
 set_env_if_empty ROBOT_CONTROL_PASSWORD "$(gen_secret)"
 
-if [[ -f "$IPC_DIR/.env" ]]; then
-  # shellcheck disable=SC1090
-  set -a
-  # shellcheck source=/dev/null
-  source "$IPC_DIR/.env"
-  set +a
-  if [[ -n "${MQTT_PASSWORD:-}" ]]; then
-    if grep -qE "^MQTT_PASSWORD=$" .env 2>/dev/null || ! grep -qE "^MQTT_PASSWORD=" .env 2>/dev/null \
-      || grep -qE "^MQTT_PASSWORD=$" .env 2>/dev/null; then
-      set_key_in_file .env MQTT_PASSWORD "$MQTT_PASSWORD"
-      echo "  copied MQTT_PASSWORD from ${IPC_DIR}/.env"
-    else
-      echo "  kept existing MQTT_PASSWORD"
-    fi
-  else
-    echo "WARN: ${IPC_DIR}/.env has no MQTT_PASSWORD — run ipc ./prepare.sh with oem (or oem-io) first" >&2
+side_mqtt="$(env_file_value .env MQTT_PASSWORD)"
+if [[ -z "$side_mqtt" ]]; then
+  if [[ ! -f "$IPC_DIR/.env" ]]; then
+    echo "ERROR: edge checkout has no .env at ${IPC_DIR}/.env" >&2
+    exit 1
   fi
+  ipc_mqtt="$(env_file_value "$IPC_DIR/.env" MQTT_PASSWORD)"
+  if [[ -z "$ipc_mqtt" ]]; then
+    echo "ERROR: MQTT_PASSWORD is empty in ${IPC_DIR}/.env" >&2
+    echo "Re-run ./up.sh in that edge checkout so prepare.sh generates the Mosquitto password, then run this again." >&2
+    exit 1
+  fi
+  set_key_in_file .env MQTT_PASSWORD "$ipc_mqtt"
+  echo "  copied MQTT_PASSWORD from ${IPC_DIR}/.env"
 else
-  echo "WARN: ipc example .env not found at ${IPC_DIR}/.env — set MQTT_PASSWORD manually to match Mosquitto" >&2
+  echo "  kept existing MQTT_PASSWORD"
 fi
 
 # shellcheck disable=SC1091

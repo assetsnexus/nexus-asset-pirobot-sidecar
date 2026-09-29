@@ -4,16 +4,17 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# linux-libc-dev provides linux/input.h and linux/input-event-codes.h so evdev
-# can build its wheel. Host kernel headers (linux-headers-$(uname -r)) are not
-# in this image and are the wrong package for a container build.
+# evdev builds a C extension. linux-libc-dev supplies linux/input.h and
+# linux/input-event-codes.h. gcc and libc6-dev are required to compile it.
+# Host kernel headers (linux-headers-$(uname -r)) are not in this image.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates linux-libc-dev \
+  && apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev linux-libc-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # Upstream f5fe667 ships no requirements.txt. Flask + bridge deps live in the overlay.
 COPY robot_control/anx-robot/requirements-bridge.txt /overlay/requirements-bridge.txt
-RUN pip install --no-cache-dir -r /overlay/requirements-bridge.txt
+RUN pip install --no-cache-dir --upgrade 'pip==26.2.1' \
+  && pip install --no-cache-dir -r /overlay/requirements-bridge.txt
 
 COPY robot_control/adeept_rasptank2/web /app
 COPY robot_control/anx-robot/anx_web_entry.py /overlay/anx_web_entry.py

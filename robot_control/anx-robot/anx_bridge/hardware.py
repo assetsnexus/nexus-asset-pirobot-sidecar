@@ -63,31 +63,46 @@ class HardwareExecutor:
         if self._init_error is not None:
             self._ensure_motion()
             return False
+        from .sensors import ensure_pin_factory
+
+        ensure_pin_factory()
         try:
             import move
-            import switch
-            import RPIservo
 
             move.setup()
-            switch.switchSetup()
-            sc = RPIservo.ServoCtrl()
-            sc.moveInit()
-            sc.start()
-            self._move = move
-            self._switch = switch
-            self._sc = sc
-            self._ready = True
-            self._setup_lights()
-            logger.info("ANX hardware executor ready (vendor move/switch/RPIservo)")
-            self._ensure_motion()
-            return True
         except Exception as exc:
             self._init_error = str(exc)
-            logger.warning(
-                "ANX hardware executor unavailable (MQTT will log actions only): %s", exc
+            logger.exception(
+                "motor setup failed (MQTT will log drive actions only)"
             )
             self._ensure_motion()
             return False
+        self._move = move
+        self._ready = True
+        try:
+            import switch
+
+            switch.switchSetup()
+            self._switch = switch
+        except Exception:
+            logger.exception("GPIO switches unavailable; motors stay enabled")
+        try:
+            import RPIservo
+
+            sc = RPIservo.ServoCtrl()
+            sc.moveInit()
+            sc.start()
+            self._sc = sc
+        except Exception:
+            logger.exception("servo setup unavailable; motors stay enabled")
+        self._setup_lights()
+        logger.info(
+            "ANX hardware executor ready (motors=yes switches=%s servos=%s)",
+            self._switch is not None,
+            self._sc is not None,
+        )
+        self._ensure_motion()
+        return True
 
     def _setup_lights(self) -> None:
         try:
@@ -216,7 +231,9 @@ class HardwareExecutor:
         move = self._move
         switch = self._switch
         sc = self._sc
-        assert move is not None and switch is not None and sc is not None
+        if move is None:
+            logger.info("robot action %s value=%s (no motors)", action, value)
+            return
 
         if action == "wsB":
             self._set_pwm(value)
@@ -251,6 +268,25 @@ class HardwareExecutor:
             if self._direction == "no":
                 move.motorStop()
                 self._speed_mps = 0.0
+        elif sc is None and action in (
+            "armUp",
+            "armDown",
+            "armStop",
+            "handUp",
+            "handDown",
+            "handStop",
+            "lookleft",
+            "lookright",
+            "LRstop",
+            "grab",
+            "loose",
+            "GLstop",
+            "up",
+            "down",
+            "UDstop",
+            "home",
+        ):
+            logger.info("robot action %s (no servos)", action)
         elif action == "armUp":
             sc.singleServo(0, 1, 2)
         elif action == "armDown":
@@ -284,6 +320,8 @@ class HardwareExecutor:
         elif action == "home":
             for idx in range(5):
                 sc.moveServoInit(idx)
+        elif switch is None and action.startswith("Switch_"):
+            logger.info("robot action %s (no GPIO switches)", action)
         elif action == "Switch_1_on":
             switch.switch(1, 1)
         elif action == "Switch_1_off":

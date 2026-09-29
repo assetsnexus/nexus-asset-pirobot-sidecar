@@ -8,9 +8,26 @@ Line IR: GPIO 17 (right) / 27 (middle) / 22 (left).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_pin_factory() -> None:
+    """Open the header gpiochip. Pi 5 kernels alias it to gpiochip0; older ones use gpiochip4."""
+    if getattr(ensure_pin_factory, "done", False):
+        return
+    try:
+        from gpiozero import Device
+        from gpiozero.pins.lgpio import LGPIOFactory
+
+        chip = 4 if os.path.exists("/dev/gpiochip4") else 0
+        Device.pin_factory = LGPIOFactory(chip=chip)
+        logger.info("gpiozero pin factory lgpio chip=%s", chip)
+    except Exception as exc:
+        logger.warning("gpiozero pin factory unavailable: %s", exc)
+    ensure_pin_factory.done = True
 
 ULTRA_TRIGGER = 23
 ULTRA_ECHO = 24
@@ -49,6 +66,7 @@ class SensorSuite:
         if self._init_attempted:
             return
         self._init_attempted = True
+        ensure_pin_factory()
         if self._ultrasonic_mm_fn is None:
             self._setup_ultrasonic()
         if self._battery_fn is None:

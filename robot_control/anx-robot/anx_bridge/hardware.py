@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import time
 from typing import Any, Optional
 
@@ -23,11 +25,29 @@ logger = logging.getLogger(__name__)
 _LED_GPIO = {1: 9, 2: 25, 3: 11}
 
 
-class _DirectLeds:
-    """Drive the HAT LEDs with lgpio and no bias flags.
+def _set_gpio_function(gpios: list[int]) -> None:
+    """GPIO 9 and 11 are SPI0 MISO and SCLK. While SPI owns them the kernel returns EINVAL."""
+    pinctrl = shutil.which("pinctrl")
+    if pinctrl is None:
+        logger.warning("pinctrl is not installed; SPI may still own GPIO 9 and 11")
+        return
+    for gpio in gpios:
+        proc = subprocess.run(
+            [pinctrl, "set", str(gpio), "op", "pn"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            logger.warning("pinctrl set %s op pn failed: %s", gpio, detail)
 
-    gpiozero's first claim uses SET_PULL_NONE. On this Pi the kernel answers
-    GPIO 9 with EINVAL (`xGpioHandleRequest: Invalid argument`).
+
+class _DirectLeds:
+    """Drive the HAT LEDs with lgpio.
+
+    GPIO 9 and 11 are SPI0 pins. Claim them as GPIO outputs before lgpio
+    requests the line, otherwise the kernel returns EINVAL.
     """
 
     def __init__(self) -> None:
@@ -35,6 +55,7 @@ class _DirectLeds:
 
         self._lgpio = lgpio
         chip = 4 if os.path.exists("/dev/gpiochip4") else 0
+        _set_gpio_function(list(_LED_GPIO.values()))
         self._handle = lgpio.gpiochip_open(chip)
         if self._handle < 0:
             raise RuntimeError(f"gpiochip_open({chip}) failed: {self._handle}")

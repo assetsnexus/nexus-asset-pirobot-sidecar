@@ -76,11 +76,19 @@ class SensorSuite:
 
     def _setup_ultrasonic(self) -> None:
         try:
+            import warnings
+
             from gpiozero import DistanceSensor
 
-            self._ultra = DistanceSensor(
-                echo=ULTRA_ECHO, trigger=ULTRA_TRIGGER, max_distance=ULTRA_MAX_M
-            )
+            # Software timing is the container path. pigpio would need a host daemon.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="For more accurate readings, use the pigpio pin factory.*",
+                )
+                self._ultra = DistanceSensor(
+                    echo=ULTRA_ECHO, trigger=ULTRA_TRIGGER, max_distance=ULTRA_MAX_M
+                )
         except Exception as exc:
             logger.debug("ultrasonic unavailable: %s", exc)
 

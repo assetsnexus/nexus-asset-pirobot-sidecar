@@ -6,7 +6,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-IPC_DIR="${IPC_DIR:-$ROOT/../asset-node-ipc-docker}"
+# shellcheck disable=SC1091
+source "$ROOT/resolve-ipc-dir.sh"
+if [[ -z "${IPC_DIR:-}" ]]; then
+  resolve_ipc_checkout "$ROOT" || IPC_DIR="$ROOT/../nexus-asset-example-docker-dev"
+fi
+export IPC_DIR IPC_MQTT_CERTS_DIR
 WEB_DIR="$ROOT/robot_control/adeept_rasptank2/web"
 WEB_ENV="$WEB_DIR/.env"
 OVERLAY_ENV_EXAMPLE="$ROOT/robot_control/anx-robot/web.env.example"
@@ -117,12 +122,19 @@ for k in MQTT_BROKER MQTT_USER MQTT_PASSWORD MQTT_CA_FILE ANX_BRIDGE_ENABLED ANX
 done
 echo "  synced MQTT/ANX join keys into web/.env (gitignored; submodule untouched)"
 
+# .env may still name the old sibling folder. Prefer the checkout that has the CA.
+if ! resolve_ipc_checkout "$ROOT"; then
+  :
+fi
+if [[ -n "${IPC_MQTT_CERTS_DIR:-}" ]]; then
+  set_key_in_file .env IPC_MQTT_CERTS_DIR "$IPC_MQTT_CERTS_DIR"
+fi
 CA="${IPC_MQTT_CERTS_DIR:-$IPC_DIR/data/mqtt/certs}/ca.crt"
 if [[ -f "$CA" ]]; then
   echo "  MQTT CA present: $CA"
 else
-  echo "WARN: MQTT CA missing ($CA)" >&2
-  echo "  Deploy order: cd ${IPC_DIR} && ensure COMPOSE_PROFILES includes oem, then ./prepare.sh && docker compose up -d" >&2
+  echo "WARN: MQTT CA not found next to this checkout (looked for $CA)." >&2
+  echo "  The edge node writes it at data/mqtt/certs/ca.crt inside its own checkout (sibling nexus-asset-example-docker-dev)." >&2
 fi
 
 if [[ -z "${ROBOT_CONTROL_PASSWORD:-}" ]]; then

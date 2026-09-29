@@ -5,14 +5,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-IPC_DIR="${IPC_DIR:-$ROOT/../asset-node-ipc-docker}"
-CA="${IPC_MQTT_CERTS_DIR:-$IPC_DIR/data/mqtt/certs}/ca.crt"
-
-if [[ ! -f "$CA" ]]; then
-  echo "ERROR: MQTT CA missing ($CA)." >&2
-  echo "Start the edge node first:  cd ${IPC_DIR} && ./up.sh" >&2
+# shellcheck disable=SC1091
+source "$ROOT/resolve-ipc-dir.sh"
+if ! resolve_ipc_checkout "$ROOT"; then
+  echo "ERROR: MQTT CA not found next to this checkout." >&2
+  echo "The edge node is already running in its own directory. This sidecar only needs that directory's data/mqtt/certs/ca.crt." >&2
+  echo "Looked under:" >&2
+  printf '%s\n' "$IPC_LOOKED" >&2
+  echo "Expected sibling: ../nexus-asset-example-docker-dev (the git clone name)." >&2
+  echo "If the edge checkout lives elsewhere: IPC_DIR=/path/to/that/checkout ./up.sh" >&2
   exit 1
 fi
+export IPC_DIR IPC_MQTT_CERTS_DIR
 
 if [[ ! -f robot_control/adeept_rasptank2/web/app.py ]]; then
   echo "ERROR: vendor web tree missing. Clone with: git clone --recurse-submodules" >&2
@@ -32,6 +36,7 @@ set_key() {
 }
 
 # Join the edge stack. Do not copy the host MQTT URL (127.0.0.1) into this container.
+set_key IPC_MQTT_CERTS_DIR "$IPC_MQTT_CERTS_DIR"
 set_key ANX_BRIDGE_ENABLED true
 set_key MQTT_BROKER "mqtts://mqtt:8883"
 set_key MQTT_USER anx

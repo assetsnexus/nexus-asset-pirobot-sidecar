@@ -34,7 +34,7 @@ Joining the ANX IPC Mosquitto stack is below.
 
 ## Ship (after the edge node)
 
-The edge node must already be up (`./up.sh` in asset-node-ipc-docker). This sidecar assumes that stack: same Docker network, Mosquitto user `anx`, CA from that tree. No env edits. This command builds the image on the Pi. No Docker registry.
+The edge node must already be up (`./up.sh` in the sibling checkout `nexus-asset-example-docker-dev`). This sidecar finds that tree by `data/mqtt/certs/ca.crt`, joins its Docker network, and uses Mosquitto user `anx`. No env edits. This command builds the image on the Pi. No Docker registry.
 
 ```bash
 git clone --recurse-submodules https://github.com/assetsnexus/nexus-asset-pirobot-sidecar.git

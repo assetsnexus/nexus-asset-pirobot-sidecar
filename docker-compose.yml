@@ -5,17 +5,16 @@
 #   2. Ensure COMPOSE_PROFILES includes oem (or oem-io)
 #   3. ./prepare.sh          # generates MQTT_PASSWORD + data/mqtt/certs/ca.crt
 #   4. docker compose up -d  # creates network anx-assets-ipc-network + Mosquitto
-#   5. cd ../asset-demo-pirobot-sidecar && ./prepare.sh
-#   6. set ANX_BRIDGE_ENABLED=true when ready for portal MQTT drive
-#   7. docker compose up -d
+#   5. cd ../asset-demo-pirobot-sidecar && ./up.sh
 #
-# Image (publish later — do not build in this readiness pass):
-#   eu1.dockerreg.sdk.assetsnexus.org/anx-robot-sidecar:latest
+# Image is built from this directory on `docker compose up`. No registry pull.
 # Bridge package lives in robot_control/anx-robot/anx_bridge (overlay); no second Mosquitto.
 
 services:
   anx-robot:
-    image: ${ANX_ROBOT_IMAGE:-eu1.dockerreg.sdk.assetsnexus.org/anx-robot-sidecar}:${ANX_ROBOT_TAG:-latest}
+    build: .
+    image: anx-robot-sidecar:local
+    pull_policy: build
     container_name: anx-robot-sidecar
     restart: unless-stopped
     env_file:
@@ -23,7 +22,7 @@ services:
     environment:
       - ROBOT_CONTROL_PASSWORD=${ROBOT_CONTROL_PASSWORD:?set ROBOT_CONTROL_PASSWORD via ./prepare.sh}
       - ANX_ROBOT_WEB_DIR=/app
-      - ANX_BRIDGE_ENABLED=${ANX_BRIDGE_ENABLED:-false}
+      - ANX_BRIDGE_ENABLED=${ANX_BRIDGE_ENABLED:-true}
       - ANX_CONTROL_SOURCE=${ANX_CONTROL_SOURCE:-auto}
       - ANX_DEADMAN_MS=${ANX_DEADMAN_MS:-500}
       - ANX_TOPIC_PREFIX=${ANX_TOPIC_PREFIX:-rasptank}

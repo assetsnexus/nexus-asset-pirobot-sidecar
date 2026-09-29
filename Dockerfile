@@ -1,5 +1,4 @@
-# Build context for eu1.dockerreg.sdk.assetsnexus.org/anx-robot-sidecar
-# Publish pipeline builds this; do not docker build during example readiness checks.
+# Built by `docker compose up` in this directory. No registry image.
 # Vendor tree under robot_control/adeept_rasptank2 is not modified — ANX overlay is anx-robot/.
 FROM python:3.11-slim-bookworm
 

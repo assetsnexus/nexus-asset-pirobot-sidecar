@@ -32,26 +32,18 @@ A USB gamepad uses the Xbox map in `robot_control/anx-robot/anx_bridge/controlle
 
 Joining the ANX IPC Mosquitto stack is below.
 
-## Deploy order (prerequisite)
+## Ship (after the edge node)
 
-MQTT join needs the IPC broker and CA **before** this sidecar. This is an ops order requirement, not a missing Docker image:
+The edge node must already be up (`./up.sh` in asset-node-ipc-docker). This sidecar assumes that stack: same Docker network, Mosquitto user `anx`, CA from that tree. No env edits. This command builds the image on the Pi. No Docker registry.
 
 ```bash
-# 1) IPC stack with oem (Mosquitto TLS + passwd + ca.crt)
-cd ../asset-node-ipc-docker
-# COMPOSE_PROFILES must include oem (or oem-io), e.g. registry-db,oem
-./prepare.sh
-docker compose up -d
-# Confirm: data/mqtt/certs/ca.crt exists; network anx-assets-ipc-network exists
-
-# 2) This sidecar
-cd ../asset-demo-pirobot-sidecar
-./prepare.sh          # .env + gitignored web/.env from overlay; copies MQTT_PASSWORD from ipc
-# Enable bridge once ipc oem is healthy:
-#   set ANX_BRIDGE_ENABLED=true in .env (and re-run ./prepare.sh to sync web/.env)
-docker compose up -d  # pulls published anx-robot-sidecar image
+git clone --recurse-submodules https://github.com/assetsnexus/nexus-asset-pirobot-sidecar.git
+cd nexus-asset-pirobot-sidecar
+./up.sh
 curl -sf http://127.0.0.1:5000/health
 ```
+
+`./up.sh` copies the MQTT password from the edge node, turns the bridge on, and runs `docker compose up -d --build`. Then pair the edge node with any one of the four methods in the IPC README (manual ZIP, USB, Bluetooth, pairing link).
 
 Web UI: `http://<pi>:5000` (password from `.env` / `ROBOT_CONTROL_PASSWORD`).
 
@@ -63,13 +55,9 @@ Web UI: `http://<pi>:5000` (password from `.env` / `ROBOT_CONTROL_PASSWORD`).
 4. Subscribes to `{ANX_TOPIC_PREFIX}/cmd`, `{ANX_TOPIC_PREFIX}/controller/+`, and `{prefix}/node_heartbeat`; publishes `{prefix}/telemetry` (~1 Hz), `{prefix}/telemetry_fast` (range ~20 Hz), and `{prefix}/availability`.
 5. Hardware commands go through an overlay executor that imports vendor `move` / `switch` / `RPIservo` / `robotLight` when present; without GPIO the bridge still MQTT-connects and logs actions. Timed motions (`drive_cm`, `turn_*_90`, `drive_sequence`) and open-loop odometry live only in `anx-robot/` (vendor tree untouched).
 
-## Image publish (not done here)
+## Image
 
-| Image | Tag | Built from |
-|-------|-----|------------|
-| `eu1.dockerreg.sdk.assetsnexus.org/anx-robot-sidecar` | `latest` | `Dockerfile` (vendor web + `anx-robot/` overlay) |
-
-Until that image is published, `docker compose up` cannot pull it. Do not commit registry credentials.
+`docker compose up` builds `anx-robot-sidecar:local` from the `Dockerfile` in this directory (vendor web + `anx-robot/` overlay). Nothing is pulled from a registry.
 
 Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh --with-inference` there).
 
@@ -106,7 +94,8 @@ Compose probes `GET /health` on port 5000 (unauthenticated JSON `{ ok: true }`),
 
 | Path | Role |
 |------|------|
-| `docker-compose.yml` | Sidecar service + external ipc network |
+| `up.sh` | One command: prepare, build locally, start |
+| `docker-compose.yml` | Sidecar service + external ipc network (`pull_policy: build`) |
 | `Dockerfile` | Image recipe (vendor web + overlay entry + `anx_bridge`) |
 | `prepare.sh` | `.env` + gitignored `web/.env`; never dirties the submodule |
 | `.env.example` | Documented defaults (no secrets) |

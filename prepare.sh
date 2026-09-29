@@ -141,8 +141,5 @@ if command -v git >/dev/null 2>&1 && [[ -d "$ROOT/robot_control/adeept_rasptank2
 fi
 
 echo ""
-echo "Next (after ipc oem stack is up):"
-echo "  # optional: set ANX_BRIDGE_ENABLED=true in .env, then re-run ./prepare.sh to sync web/.env"
-echo "  docker compose up -d   # pulls ${ANX_ROBOT_IMAGE:-eu1.dockerreg.sdk.assetsnexus.org/anx-robot-sidecar}:${ANX_ROBOT_TAG:-latest}"
-echo "  curl -sf http://127.0.0.1:${ROBOT_HTTP_PORT:-5000}/health"
+echo "Next: ./up.sh   # builds the image locally and starts the sidecar"
 echo "Done."

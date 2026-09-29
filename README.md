@@ -57,7 +57,7 @@ Web UI: `http://<pi>:5000` (password from `.env` / `ROBOT_CONTROL_PASSWORD`).
 
 ## Image
 
-`docker compose up` builds `anx-robot-sidecar:local` from the `Dockerfile` in this directory (vendor web + `anx-robot/` overlay). Nothing is pulled from a registry.
+`docker compose up` builds `anx-robot-sidecar:local` from the `Dockerfile` in this directory (vendor web + `anx-robot/` overlay). Nothing is pulled from a registry. The image includes Adafruit Blinka (`board`), the PCA9685 motor driver, and gpiozero. Compose runs the container privileged so it can open the Pi I2C bus and GPIO.
 
 Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh --with-inference` there).
 

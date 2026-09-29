@@ -1,6 +1,12 @@
 # Overlay runtime. Upstream adeept_rasptank2@f5fe667 has no requirements.txt.
-# Pi camera / GPIO packages stay on the device image; this file is enough for /health + MQTT.
+# `board` comes from adafruit-blinka (vendor move.py). gpiozero drives the LEDs.
 flask>=2.0
 flask-cors>=3.0
 paho-mqtt>=2
 evdev
+adafruit-blinka
+adafruit-circuitpython-pca9685
+adafruit-circuitpython-motor
+adafruit-circuitpython-ads7830
+gpiozero
+lgpio

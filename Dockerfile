@@ -8,7 +8,8 @@ WORKDIR /app
 # linux/input-event-codes.h. gcc and libc6-dev are required to compile it.
 # Host kernel headers (linux-headers-$(uname -r)) are not in this image.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev linux-libc-dev \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates gcc libc6-dev linux-libc-dev swig liblgpio-dev libgpiod2 \
   && rm -rf /var/lib/apt/lists/*
 
 # Upstream f5fe667 ships no requirements.txt. Flask + bridge deps live in the overlay.

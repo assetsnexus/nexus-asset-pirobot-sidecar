@@ -49,10 +49,9 @@ services:
       timeout: 10s
       retries: 5
       start_period: 40s
-    # Uncomment on a real Pi with camera / GPIO (lab override — do not invent a second network):
-    # devices:
-    #   - /dev/video0:/dev/video0
-    # privileged: true
+    # HAT motors use I2C (/dev/i2c-1) and LEDs use GPIO. privileged exposes those
+    # host devices. Camera stays opt-in: add /dev/video0 when a camera is attached.
+    privileged: true
 
 networks:
   anx-assets-ipc-network:

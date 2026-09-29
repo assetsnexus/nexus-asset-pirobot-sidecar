@@ -5,11 +5,18 @@ FROM python:3.11-slim-bookworm
 WORKDIR /app
 
 # evdev builds a C extension. linux-libc-dev supplies linux/input.h and
-# linux/input-event-codes.h. gcc and libc6-dev are required to compile it.
+# linux/input-event-codes.h. gcc and libc6-dev compile it.
+# liblgpio-dev is not in Debian bookworm; it is in the Raspberry Pi archive.
 # Host kernel headers (linux-headers-$(uname -r)) are not in this image.
 RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && curl -fsSL https://archive.raspberrypi.org/debian/raspberrypi.gpg.key \
+    | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg \
+  && echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] http://archive.raspberrypi.org/debian/ bookworm main" \
+    > /etc/apt/sources.list.d/raspi.list \
+  && apt-get update \
   && apt-get install -y --no-install-recommends \
-    ca-certificates gcc libc6-dev linux-libc-dev swig liblgpio-dev libgpiod2 \
+    gcc libc6-dev linux-libc-dev swig liblgpio1 liblgpio-dev libgpiod2 \
   && rm -rf /var/lib/apt/lists/*
 
 # Upstream f5fe667 ships no requirements.txt. Flask + bridge deps live in the overlay.

@@ -49,8 +49,9 @@ services:
       timeout: 10s
       retries: 5
       start_period: 40s
-    # HAT motors use I2C (/dev/i2c-1) and LEDs use GPIO. privileged exposes those
-    # host devices. Camera stays opt-in: add /dev/video0 when a camera is attached.
+    # privileged lets the process open GPIO and I2C. It does not create the
+    # device nodes. up.sh writes docker-compose.devices.yml for the host's
+    # /dev/gpiochip* (lgpio) and /dev/i2c-* (PCA9685).
     privileged: true
 
 networks:

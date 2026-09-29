@@ -1,6 +1,7 @@
 .env
 robot_control/adeept_rasptank2/web/.env
 docker-compose.override.yml
+docker-compose.devices.yml
 *.local
 __pycache__/
 *.pyc

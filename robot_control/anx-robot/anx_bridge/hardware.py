@@ -8,6 +8,7 @@ Adds open-loop timed motion, sensor sampling, and WS2812 police lights in the ov
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -17,6 +18,55 @@ from .odometry import speed_mps
 from .sensors import SensorSuite
 
 logger = logging.getLogger(__name__)
+
+# Vendor switch.py drives these BCM lines (LED ports 1–3).
+_LED_GPIO = {1: 9, 2: 25, 3: 11}
+
+
+class _DirectLeds:
+    """Drive the HAT LEDs with lgpio and no bias flags.
+
+    gpiozero's first claim uses SET_PULL_NONE. On this Pi the kernel answers
+    GPIO 9 with EINVAL (`xGpioHandleRequest: Invalid argument`).
+    """
+
+    def __init__(self) -> None:
+        import lgpio
+
+        self._lgpio = lgpio
+        chip = 4 if os.path.exists("/dev/gpiochip4") else 0
+        self._handle = lgpio.gpiochip_open(chip)
+        if self._handle < 0:
+            raise RuntimeError(f"gpiochip_open({chip}) failed: {self._handle}")
+        self._pins: dict[int, int] = {}
+        for port, gpio in _LED_GPIO.items():
+            try:
+                lgpio.gpio_claim_output(self._handle, gpio, 0)
+                self._pins[port] = gpio
+            except Exception as exc:
+                logger.warning("LED port %s GPIO %s unavailable: %s", port, gpio, exc)
+        if not self._pins:
+            raise RuntimeError("no LED GPIO lines claimed")
+
+    def switch(self, port: int, status: int) -> None:
+        gpio = self._pins.get(port)
+        if gpio is None:
+            logger.info("LED port %s is not claimed", port)
+            return
+        self._lgpio.gpio_write(self._handle, gpio, 1 if status else 0)
+
+
+def _quiet_servo_prints(servo_cls: type) -> None:
+    """Vendor pause/resume print a banner on every stop. Keep the flag behavior."""
+
+    def pause(self: Any) -> None:
+        self._ServoCtrl__flag.clear()
+
+    def resume(self: Any) -> None:
+        self._ServoCtrl__flag.set()
+
+    servo_cls.pause = pause  # type: ignore[method-assign]
+    servo_cls.resume = resume  # type: ignore[method-assign]
 
 
 class HardwareExecutor:
@@ -80,15 +130,13 @@ class HardwareExecutor:
         self._move = move
         self._ready = True
         try:
-            import switch
-
-            switch.switchSetup()
-            self._switch = switch
+            self._switch = _DirectLeds()
         except Exception:
             logger.exception("GPIO switches unavailable; motors stay enabled")
         try:
             import RPIservo
 
+            _quiet_servo_prints(RPIservo.ServoCtrl)
             sc = RPIservo.ServoCtrl()
             sc.moveInit()
             sc.start()

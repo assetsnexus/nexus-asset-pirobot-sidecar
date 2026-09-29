@@ -4,8 +4,11 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
+# linux-libc-dev provides linux/input.h and linux/input-event-codes.h so evdev
+# can build its wheel. Host kernel headers (linux-headers-$(uname -r)) are not
+# in this image and are the wrong package for a container build.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates linux-libc-dev \
   && rm -rf /var/lib/apt/lists/*
 
 # Upstream f5fe667 ships no requirements.txt. Flask + bridge deps live in the overlay.

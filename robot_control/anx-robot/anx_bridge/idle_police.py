@@ -95,11 +95,9 @@ class StatusLightsController:
                 self._manual = False
                 self._apply_auto(force=True)
             return
-        # Disconnected + idle must stay red even if something cleared applied.
-        if not self._ws_connected and idle:
-            self._apply_auto(force=self._applied != MODE_RED)
-            return
-        self._apply_auto(force=False)
+        # Always keep unpaired=red / paired=blue applied (do not wait for idle).
+        desired = self._desired()
+        self._apply_auto(force=self._applied != desired)
 
     def _desired(self) -> str:
         return MODE_BLUE if self._ws_connected else MODE_RED

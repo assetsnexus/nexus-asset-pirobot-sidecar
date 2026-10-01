@@ -673,19 +673,22 @@ def test_idle_police_turns_on_after_quiet():
     assert "red" in hw.modes
 
 
-def test_power_estimate_from_voltage_sag(monkeypatch):
-    from anx_bridge.power_sense import estimate_from_volts
+def test_battery_soc_from_voltage(monkeypatch):
+    from anx_bridge.power_sense import estimate_from_volts, volts_to_percent
 
-    monkeypatch.setenv("ANX_BATTERY_ESR_OHM", "0.15")
-    monkeypatch.setenv("ANX_POWER_WARN_W", "6")
-    monkeypatch.setenv("ANX_POWER_CRIT_W", "12")
+    monkeypatch.setenv("ANX_BATT_V_EMPTY", "6.0")
+    monkeypatch.setenv("ANX_BATT_V_FULL", "8.4")
+    monkeypatch.setenv("ANX_BATT_WARN_PCT", "30")
+    monkeypatch.setenv("ANX_BATT_CRIT_PCT", "15")
 
-    idle = estimate_from_volts(7.4, volts_rest=7.4, esr_ohm=0.15)
-    assert idle.power_w_est == 0.0
-    assert idle.level == "ok"
+    assert volts_to_percent(8.4) == 100.0
+    assert volts_to_percent(6.0) == 0.0
+    assert volts_to_percent(7.2) == 50.0
 
-    # Sag 0.3 V @ 7.1 V with 0.15 Ω → I=2 A → P≈14.2 W → crit
-    stall = estimate_from_volts(7.1, volts_rest=7.4, esr_ohm=0.15)
-    assert stall.current_a_est == 2.0
-    assert stall.power_w_est == 14.2
-    assert stall.level == "crit"
+    full = estimate_from_volts(8.4)
+    assert full.percent == 100.0
+    assert full.level == "ok"
+
+    low = estimate_from_volts(6.2)
+    assert low.percent < 15
+    assert low.level == "crit"

@@ -23,19 +23,20 @@ def bind_servo_ctrl(servo_ctrl: Any) -> None:
     with _lock:
         _ctrl = servo_ctrl
         register_servo_ctrl(servo_ctrl)
-        # Seed remembered angles from vendor nowPos / initPos when available.
+        # Seed remembered *logical* angles from vendor nowPos / initPos (PWM).
         for lim in all_limits():
             if lim.channel in _angles:
                 continue
-            seeded = None
+            seeded_pwm = None
             for attr in ("nowPos", "initPos"):
                 arr = getattr(servo_ctrl, attr, None)
                 if arr is not None and len(arr) > lim.channel:
-                    seeded = int(arr[lim.channel])
+                    seeded_pwm = int(arr[lim.channel])
                     break
-            _angles[lim.channel] = lim.clamp(
-                seeded if seeded is not None else lim.rest_deg
-            )
+            if seeded_pwm is None:
+                _angles[lim.channel] = lim.rest_deg
+            else:
+                _angles[lim.channel] = lim.pwm_to_ui(seeded_pwm)
 
 
 def current_angles() -> Dict[int, int]:
@@ -56,15 +57,17 @@ def describe_servos() -> List[dict]:
             "min": lim.min_deg,
             "max": lim.max_deg,
             "rest": lim.rest_deg,
+            "invert": lim.invert,
         }
         for lim in all_limits()
     ]
 
 
 def set_servo_angle(channel: int, deg: int, *, ctrl: Any = None) -> int:
-    """Drive one channel to an absolute angle (clamped to robot limits)."""
+    """Drive one channel to a logical (slider) angle; clamped + optional invert."""
     lim = servo_limit(channel)
-    target = lim.clamp(deg)
+    ui = lim.clamp(deg)
+    pwm = lim.ui_to_pwm(ui)
     with _lock:
         sc = ctrl if ctrl is not None else _ctrl
         if sc is None:
@@ -72,14 +75,23 @@ def set_servo_angle(channel: int, deg: int, *, ctrl: Any = None) -> int:
         bind_servo_ctrl(sc)
         ensure_servos_armed(sc, park_arm=False)
         if hasattr(sc, "setPWM"):
-            sc.setPWM(channel, target)
+            sc.setPWM(channel, pwm)
         elif hasattr(sc, "set_angle"):
-            sc.set_angle(channel, target)
+            sc.set_angle(channel, pwm)
         else:
             raise RuntimeError("servo ctrl cannot set angle")
-        _angles[channel] = target
-        logger.info("servo ch%s (%s) → %s° (limits %s–%s)", channel, lim.name, target, lim.min_deg, lim.max_deg)
-        return target
+        _angles[channel] = ui
+        logger.info(
+            "servo ch%s (%s) UI %s° → PWM %s° (limits %s–%s%s)",
+            channel,
+            lim.name,
+            ui,
+            pwm,
+            lim.min_deg,
+            lim.max_deg,
+            ", inverted" if lim.invert else "",
+        )
+        return ui
 
 
 def set_many(positions: Dict[int, int], *, ctrl: Any = None) -> Dict[int, int]:

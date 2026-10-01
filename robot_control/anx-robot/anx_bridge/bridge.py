@@ -118,7 +118,24 @@ def start_bridge(
     )
     _deadman = deadman
 
+    published_holder: dict = {}
+
+    def publish_fast(body: dict) -> None:
+        bridge = published_holder.get("mqtt")
+        if bridge is not None:
+            bridge.publish_telemetry_fast(body)
+
     status_lights = None
+    if isinstance(executor, HardwareExecutor):
+        # Bring up motors/servos/WS2812 before status lights so blink has a strip.
+        try:
+            executor.setup()
+        except Exception:
+            logger.exception("hardware setup at bridge start failed")
+        executor.attach_runtime(
+            deadman=deadman, publish_fast=publish_fast, idle_police=None
+        )
+
     if isinstance(executor, HardwareExecutor) and cfg.idle_police_enabled:
         status_lights = StatusLightsController(
             executor,
@@ -127,6 +144,9 @@ def start_bridge(
         )
         _status_lights = status_lights
         _idle_police = status_lights
+        executor.attach_runtime(
+            deadman=deadman, publish_fast=publish_fast, idle_police=status_lights
+        )
         # Start disconnected → red until a UI control socket connects.
         status_lights.set_ws_connected(False)
         logger.info(
@@ -136,18 +156,6 @@ def start_bridge(
     else:
         _status_lights = None
         _idle_police = None
-
-    published_holder: dict = {}
-
-    def publish_fast(body: dict) -> None:
-        bridge = published_holder.get("mqtt")
-        if bridge is not None:
-            bridge.publish_telemetry_fast(body)
-
-    if isinstance(executor, HardwareExecutor):
-        executor.attach_runtime(
-            deadman=deadman, publish_fast=publish_fast, idle_police=status_lights
-        )
 
     try:
         mapping = load_map(cfg.controller_map_path)

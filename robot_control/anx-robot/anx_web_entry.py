@@ -220,7 +220,7 @@ def _install_health() -> None:
 
 
 def _install_servo_api(flask_app) -> None:
-    """Absolute servo angles + power estimate APIs for the stock UI overlays."""
+    """Absolute servo angles + battery SoC / 7s series APIs for Hard Ware overlays."""
     from anx_bridge.power_sense import power_payload, start_power_sampler
     from anx_bridge.servo_positions import describe_servos, set_many, set_servo_angle
 
@@ -239,7 +239,7 @@ def _install_servo_api(flask_app) -> None:
         try:
             from anx_bridge import note_ui_control
 
-            note_ui_control(arm_servos=False)
+            note_ui_control(arm_servos=True)
         except Exception:
             pass
         body = request.get_json(silent=True) or {}
@@ -282,19 +282,16 @@ def _install_servo_api(flask_app) -> None:
 
 
 def _install_get_info_battery(ws_mod) -> None:
-    """Inject estimated load watts into get_info (Hard Ware chip under CPU Usage).
-
-    Watts ≈ V * (V_rest - V) / R_esr from battery sag — HAT has no current shunt.
-    """
+    """Inject battery SoC % into get_info (Hard Ware chip under CPU Usage)."""
     import json
 
-    from anx_bridge.power_sense import last_sample, sample_power
+    from anx_bridge.power_sense import last_sample, sample_battery
 
     if not hasattr(ws_mod, "recv_msg"):
         return
     _orig_recv_msg = ws_mod.recv_msg
 
-    async def recv_msg_with_power(websocket):
+    async def recv_msg_with_batt(websocket):
         _send = websocket.send
 
         async def send_wrap(payload):
@@ -305,9 +302,9 @@ def _install_get_info_battery(ws_mod) -> None:
             if isinstance(obj, dict) and obj.get("title") == "get_info":
                 data = obj.get("data")
                 if isinstance(data, list) and len(data) == 3:
-                    sample = last_sample() or sample_power()
-                    watts = "" if sample is None else str(sample.power_w_est)
-                    obj["data"] = [data[0], data[1], watts, data[2]]
+                    sample = last_sample() or sample_battery()
+                    pct = "" if sample is None else str(int(round(sample.percent)))
+                    obj["data"] = [data[0], data[1], pct, data[2]]
                     payload = json.dumps(obj)
             return await _send(payload)
 
@@ -317,8 +314,8 @@ def _install_get_info_battery(ws_mod) -> None:
         finally:
             websocket.send = _send  # type: ignore[method-assign]
 
-    ws_mod.recv_msg = recv_msg_with_power
-    _log.info("wrapped webServer.recv_msg to inject estimated watts into get_info")
+    ws_mod.recv_msg = recv_msg_with_batt
+    _log.info("wrapped webServer.recv_msg to inject battery %% into get_info")
 
 
 def _start_anx_bridge() -> None:
@@ -365,14 +362,19 @@ def _install_ui_https_rewrites() -> None:
             '"http://"+location.hostname+":5000/video_feed',
             'location.origin+"/video_feed',
         ),
-        # Status chips: Load Power (est. W from battery sag) under CPU Usage.
+        # Status chips: Batt SoC % under CPU Usage (sparkline is separate overlay).
+        # Thresholds 101/102 keep stock chip green (higher-%-is-better); sparkline colors warn/crit.
         (
             'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["RAM","Usage",90,"%",70,85]]',
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Batt","SoC",0,"%",101,102],["RAM","Usage",90,"%",70,85]]',
+        ),
+        (
             'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Load","Power",0,"W",6,12],["RAM","Usage",90,"%",70,85]]',
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Batt","SoC",0,"%",101,102],["RAM","Usage",90,"%",70,85]]',
         ),
         (
             'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Batt","Volt",0,"V",6.4,7.2],["RAM","Usage",90,"%",70,85]]',
-            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Load","Power",0,"W",6,12],["RAM","Usage",90,"%",70,85]]',
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Batt","SoC",0,"%",101,102],["RAM","Usage",90,"%",70,85]]',
         ),
     )
 
@@ -709,6 +711,14 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
         )
     except Exception as exc:
         _log.warning("servo release after webServer import failed: %s", exc)
+
+    # Vendor import may touch SPI LEDs — re-assert unpaired/paired blink.
+    try:
+        from anx_bridge import set_control_socket_clients
+
+        set_control_socket_clients(int(_control_ws_state.get("clients") or 0))
+    except Exception as exc:
+        _log.debug("status lights re-assert after webServer import failed: %s", exc)
 
     # Overlay-only wrap: idle lights + absolute servoSet:<ch>:<deg> for sliders.
     try:

@@ -79,12 +79,18 @@ class _StatusBlinker(threading.Thread):
         if strip is None:
             return
         try:
-            if hasattr(strip, "set_all_led_color_data"):
-                strip.set_all_led_color_data(r, g, b)
-            elif hasattr(strip, "set_all_led_color"):
+            # Prefer APIs that flush to the wire. SPI Adeept_SPI_LedPixel's
+            # set_all_led_color_data only buffers — must call show().
+            if hasattr(strip, "set_all_led_color"):
                 strip.set_all_led_color(r, g, b)
+            elif hasattr(strip, "set_all_led_color_data"):
+                strip.set_all_led_color_data(r, g, b)
+                if hasattr(strip, "show"):
+                    strip.show()
             elif hasattr(strip, "setColor"):
                 strip.setColor(r, g, b)
+            else:
+                logger.debug("status blink: strip has no known paint API")
         except Exception as exc:
             logger.debug("status blink paint failed: %s", exc)
 
@@ -312,6 +318,8 @@ class HardwareExecutor:
         return True
 
     def _setup_lights(self) -> None:
+        if self._ws2812_ready and self._ws2812 is not None:
+            return
         try:
             import robotLight
 
@@ -333,6 +341,7 @@ class HardwareExecutor:
                 self._status_blinker.attach_strip(ws)
                 # Default: red blink until a control socket connects.
                 self._status_blinker.set_color("red")
+                logger.info("WS2812 status strip ready (overlay blink active)")
         except Exception as exc:
             logger.warning("WS2812 unavailable: %s", exc)
             self._ws2812_ready = False

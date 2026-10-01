@@ -894,7 +894,12 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
 
         # Plain HTTPS GET on :8888 so a new-tab "accept cert" flow has a real page
         # (browsers treat WSS :8888 trust separately from the UI :5000 cert).
-        _cert_html = (
+        #
+        # websockets==13 still exports legacy ``serve`` whose process_request is
+        # ``(path, headers) -> (status, headers, body) | None`` — NOT the asyncio
+        # ``(connection, request)`` API. Using the wrong signature breaks every
+        # handshake (cert page AND wss://).
+        _cert_body = (
             "<!DOCTYPE html><html><head><meta charset=utf-8>"
             "<title>ANX control TLS</title>"
             "<style>body{font:15px/1.45 system-ui,sans-serif;max-width:36rem;"
@@ -903,27 +908,33 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
             "</head><body>"
             "<h1>Certificate accepted</h1>"
             "<p>This is the robot <strong>control</strong> port "
-            "(WSS). You can close this tab and return to the UI — "
-            "the WebSocket should connect after a reload if needed.</p>"
+            "(WSS). You can close this tab, go back to the UI, and "
+            "<strong>reload</strong> — the WebSocket should connect now.</p>"
             "<p>Dev note: lab uses a self-signed cert from "
             "<code>data/certs/robot.crt</code>.</p>"
             "</body></html>"
-        )
+        ).encode("utf-8")
 
-        async def process_request(connection, request):
-            """Serve a tiny HTML page for non-WebSocket GETs (cert-accept tab)."""
+        async def process_request(path, request_headers):
+            """Legacy websockets process_request: non-WS GET → cert helper HTML."""
             try:
-                upgrade = (request.headers.get("Upgrade") or "").lower()
+                upgrade = (request_headers.get("Upgrade") or "").lower()
             except Exception:
                 upgrade = ""
             if upgrade == "websocket":
                 return None
-            response = connection.respond(200, _cert_html)
-            try:
-                response.headers["Content-Type"] = "text/html; charset=utf-8"
-            except Exception:
-                pass
-            return response
+            from http import HTTPStatus
+
+            return (
+                HTTPStatus.OK,
+                [
+                    ("Content-Type", "text/html; charset=utf-8"),
+                    ("Content-Length", str(len(_cert_body))),
+                    ("Cache-Control", "no-store"),
+                    ("Connection", "close"),
+                ],
+                _cert_body,
+            )
 
         async def runner() -> None:
             serve_kwargs = {"ssl": ssl_ctx} if ssl_ctx is not None else {}

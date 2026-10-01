@@ -4,7 +4,7 @@ OEM control + camera UI that **joins** [`asset-node-ipc-docker`](../asset-node-i
 
 Controller topic contract: [MQTT_CONTROLLER_CONTRACT.md](./MQTT_CONTROLLER_CONTRACT.md).
 
-Vendor sources are the git submodule `robot_control/adeept_rasptank2`, pinned to public commit `f5fe667` (`Add files via upload` on [adeept/adeept_rasptank2](https://github.com/adeept/adeept_rasptank2)). `origin` stays that GitHub repo. Do not move the pin to local commit `50860d1`, and do not push ANX commits to Adeept. ANX behaviour is the overlay under `robot_control/anx-robot/`:
+Vendor sources are the git submodule `robot_control/adeept_rasptank2`, pinned to public commit `f5fe667` (`Add files via upload` on [adeept/adeept_rasptank2](https://github.com/adeept/adeept_rasptank2)). `origin` stays that GitHub repo. Do not record unpublished local commits as the pin (Pi hosts cannot fetch them), do not move the pin to local commit `50860d1`, and do not push ANX commits to Adeept. ANX behaviour is the overlay under `robot_control/anx-robot/`:
 
 - `anx_web_entry.py` — `/health` + starts the MQTT bridge
 - `anx_bridge/` — MQTT subscribe/publish + USB/MQTT controller mapping

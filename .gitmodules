@@ -1,3 +1,4 @@
 [submodule "robot_control/adeept_rasptank2"]
 	path = robot_control/adeept_rasptank2
 	url = https://github.com/adeept/adeept_rasptank2.git
+	ignore = untracked

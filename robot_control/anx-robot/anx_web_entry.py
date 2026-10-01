@@ -263,17 +263,30 @@ def _install_ws_scheme_rewrite() -> None:
         _log.info("patched %s JS file(s) for protocol-aware control WebSocket URL", patched)
 
 
-def _flask_ssl_args() -> dict:
+def _require_tls_context():
+    """When ANX_ROBOT_TLS is on, refuse to start without certs (no silent HTTP fallback)."""
+    if not tls_enabled():
+        return None
     ctx = ssl_server_context()
+    if ctx is None:
+        cert = os.environ.get("ANX_ROBOT_TLS_CERT", "/certs/tls/robot.crt")
+        key = os.environ.get("ANX_ROBOT_TLS_KEY", "/certs/tls/robot.key")
+        raise SystemExit(
+            f"ANX_ROBOT_TLS=true but cert/key missing ({cert} / {key}). "
+            "Run ./up.sh to generate data/certs/, or set ANX_ROBOT_TLS=false."
+        )
+    return ctx
+
+
+def _flask_ssl_args() -> dict:
+    ctx = _require_tls_context() if tls_enabled() else None
     return {"ssl_context": ctx} if ctx is not None else {}
 
 
 def _patch_webapp_for_tls(web) -> None:
     """Vendor webapp.thread() calls app.run without TLS — inject ssl_context when enabled."""
-    ctx = ssl_server_context()
+    ctx = _require_tls_context() if tls_enabled() else None
     if ctx is None:
-        if tls_enabled():
-            _log.warning("ANX_ROBOT_TLS=true but cert/key missing; Flask stays on HTTP")
         return
     flask_app = getattr(_vendor, "app", None)
     if flask_app is None:
@@ -284,7 +297,7 @@ def _patch_webapp_for_tls(web) -> None:
         flask_app.run(host="0.0.0.0", port=http_port, threaded=True, ssl_context=ctx)
 
     web.thread = thread
-    _log.info("Flask UI TLS enabled on 0.0.0.0:%s (self-signed)", http_port)
+    _log.info("Flask UI TLS enabled on https://0.0.0.0:%s (self-signed)", http_port)
 
 
 def _start_adeept_control_websocket(flask_webapp) -> None:

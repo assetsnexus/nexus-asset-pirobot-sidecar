@@ -133,4 +133,12 @@ echo "Robot sidecar is up (image built locally, no registry)."
 echo "Health: curl -sk https://127.0.0.1:${PORT}/health"
 echo "UI: https://<pi-ip>:${PORT}/  Control WSS: wss://<pi-ip>:8888  (login admin:123456)"
 echo "Browser will warn on the self-signed cert from data/certs/robot.crt — that is expected."
+echo "Use https:// only (not http://) so the UI and WSS are not mixed-content blocked."
+if curl -sk --connect-timeout 3 "https://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+  echo "HTTPS health OK."
+  curl -sk "https://127.0.0.1:${PORT}/health" || true
+  echo
+else
+  echo "WARNING: https://127.0.0.1:${PORT}/health not reachable yet — check: docker logs anx-robot-sidecar"
+fi
 echo "Pair the edge node with any one method: manual ZIP, USB, Bluetooth, or pairing link."

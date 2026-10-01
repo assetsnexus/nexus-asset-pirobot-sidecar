@@ -46,8 +46,8 @@ ENV ANX_ROBOT_TLS_CERT=/certs/tls/robot.crt
 ENV ANX_ROBOT_TLS_KEY=/certs/tls/robot.key
 EXPOSE 5000 8888
 
-# /health is HTTPS when ANX_ROBOT_TLS=true (default).
+# /health is HTTPS when ANX_ROBOT_TLS=true (default). Never probe plain HTTP in that mode.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=40s \
-  CMD python -c "import os,ssl,urllib.request; ctx=ssl._create_unverified_context() if os.environ.get('ANX_ROBOT_TLS','true').lower() in ('1','true','yes','on') else None; urllib.request.urlopen('https://127.0.0.1:5000/health' if ctx is not None else 'http://127.0.0.1:5000/health', context=ctx, timeout=5)"
+  CMD python -c "import os,ssl,urllib.request; tls=os.environ.get('ANX_ROBOT_TLS','true').lower() in ('1','true','yes','on'); url=('https' if tls else 'http')+'://127.0.0.1:5000/health'; ctx=ssl._create_unverified_context() if tls else None; urllib.request.urlopen(url, context=ctx, timeout=5)"
 
 CMD ["python", "/overlay/anx_web_entry.py"]

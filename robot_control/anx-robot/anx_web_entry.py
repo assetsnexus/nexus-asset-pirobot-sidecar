@@ -213,6 +213,62 @@ def _start_anx_bridge() -> None:
         log.warning("ANX bridge not started: %s", exc)
 
 
+def _start_adeept_control_websocket(flask_webapp) -> None:
+    """Run vendor webServer.py control WebSocket on :8888 (UI hardcodes that port).
+
+    Stock Adeept entry is ``python webServer.py``, which starts Flask *and* the
+    websocket. Our entry only started Flask, so the camera UI loaded but control
+    failed with ``ws://host:8888`` connection errors.
+    """
+    if _vendor is None:
+        return
+    # webServer does ``import app`` — reuse the already-loaded vendor module so
+    # Camera()/Flask are not constructed a second time.
+    sys.modules.setdefault("app", _vendor)
+    try:
+        import webServer as ws_mod
+    except Exception as exc:
+        _log.warning("Adeept webServer.py could not be imported (%s); UI control WS disabled", exc)
+        return
+
+    ws_mod.flask_app = flask_webapp
+    try:
+        ws_mod.switch.switchSetup()
+        ws_mod.switch.set_all_switch_off()
+    except Exception as exc:
+        _log.warning("Adeept switch setup failed: %s", exc)
+
+    port = int(os.environ.get("ROBOT_WS_PORT", "8888"))
+
+    def _run() -> None:
+        import asyncio
+
+        try:
+            import websockets
+        except Exception as exc:
+            _log.error("websockets package missing (%s); pip install websockets==13.0", exc)
+            return
+
+        async def handler(websocket):
+            # websockets>=10 dropped the path argument; vendor still declares it.
+            await ws_mod.check_permit(websocket)
+            await ws_mod.recv_msg(websocket)
+
+        async def runner() -> None:
+            async with websockets.serve(handler, "0.0.0.0", port):
+                _log.info("Adeept control WebSocket listening on 0.0.0.0:%s (UI login admin:123456)", port)
+                await asyncio.Future()
+
+        try:
+            asyncio.run(runner())
+        except Exception as exc:
+            _log.error("Adeept control WebSocket exited: %s", exc)
+
+    import threading
+
+    threading.Thread(target=_run, name="adeept-control-ws", daemon=True).start()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # Patch Camera.frames before app.py does `camera = Camera()` (starts the thread).
@@ -224,6 +280,7 @@ def main() -> None:
     # Prefer the vendor webapp bootstrap (camera + Flask thread) when available.
     if hasattr(_vendor, "webapp"):
         web = _vendor.webapp()
+        _start_adeept_control_websocket(web)
         web.startthread()
         # Non-daemon Flask thread keeps the process alive; block main for systemd/docker.
         import threading

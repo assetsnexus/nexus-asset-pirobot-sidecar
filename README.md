@@ -45,7 +45,7 @@ curl -sf http://127.0.0.1:5000/health
 
 `./up.sh` copies the MQTT password from the edge node, turns the bridge on, and runs `docker compose up -d --build`. Then pair the edge node with any one of the four methods in the IPC README (manual ZIP, USB, Bluetooth, pairing link).
 
-Web UI: `http://<pi>:5000` (password from `.env` / `ROBOT_CONTROL_PASSWORD`).
+Web UI: `http://<pi>:5000` (stock Adeept WS login is `admin` / `123456`). Control uses `ws://<pi>:8888` (published by compose).
 
 ## How the MQTT bridge starts
 

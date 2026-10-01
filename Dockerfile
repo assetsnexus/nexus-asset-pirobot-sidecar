@@ -40,7 +40,7 @@ COPY robot_control/anx-robot/anx_bridge /overlay/anx_bridge
 
 ENV PYTHONUNBUFFERED=1
 ENV ANX_ROBOT_WEB_DIR=/app
-EXPOSE 5000
+EXPOSE 5000 8888
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=40s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)"

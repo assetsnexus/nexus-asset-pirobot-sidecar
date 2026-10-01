@@ -4,6 +4,8 @@
 # the Dockerfile (PYTHONPATH=/usr/lib/python3/dist-packages). imutils is pip-only.
 flask>=2.0
 flask-cors>=3.0
+# Adeept webServer.py control plane (UI uses ws://host:8888). Pin matches vendor setup.py.
+websockets==13.0
 paho-mqtt>=2
 evdev
 imutils

@@ -509,7 +509,7 @@ def test_arm_rest_deg_clamped(monkeypatch):
     from anx_bridge.servos import arm_rest_deg, park_arm_upright
 
     monkeypatch.delenv("ANX_ARM_REST_DEG", raising=False)
-    assert arm_rest_deg() == 0
+    assert arm_rest_deg() == 180
     monkeypatch.setenv("ANX_ARM_REST_DEG", "200")
     assert arm_rest_deg() == 180
 
@@ -524,9 +524,9 @@ def test_arm_rest_deg_clamped(monkeypatch):
             self.calls.append((channel, deg))
 
     fake = _Fake()
-    park_arm_upright(fake, deg=0)
-    assert fake.calls == [(0, 0)]
-    assert fake.initPos[0] == 0
+    park_arm_upright(fake, deg=180)
+    assert fake.calls == [(0, 180)]
+    assert fake.initPos[0] == 180
 
 
 def test_idle_police_turns_on_after_quiet():

@@ -4,10 +4,10 @@ Channel 0 is the shoulder ("arm" / servo A). Stock ``moveInit()`` homes every
 servo to ``init_pwm*`` which defaults to **90°**. On this tank that mid pose
 holds the arm **parallel to the ground**, so the servo stalls and overheats.
 
-Park channel 0 at an upright rest angle on start. Default is **0°** (folded up).
-Vendor ``initConfig`` rejects 0 and 180 (exclusive bounds); we drive via
-``setPWM`` / ``set_angle`` and still update ``initPos`` so later ``home`` /
-``moveAngle`` stay consistent.
+Park channel 0 at an upright rest angle on start. Default is **180°** (folded up
+away from the stock mid/forward 90° pose). Vendor ``initConfig`` rejects 0 and
+180 (exclusive bounds); we drive via ``setPWM`` / ``set_angle`` and still update
+``initPos`` so later ``home`` / ``moveAngle`` stay consistent.
 
 Override with ``ANX_ARM_REST_DEG`` (0–180) if the horn is mounted the other way.
 """
@@ -20,8 +20,8 @@ from typing import Any, Iterable
 logger = logging.getLogger(__name__)
 
 ARM_CHANNEL = 0
-# Stock mid (90) is the forward stall pose on RaspTank; upright rest is near 0°.
-_DEFAULT_ARM_REST_DEG = 0
+# Stock mid (90) is the forward stall pose on RaspTank; upright rest is 180°.
+_DEFAULT_ARM_REST_DEG = 180
 
 
 def arm_rest_deg() -> int:

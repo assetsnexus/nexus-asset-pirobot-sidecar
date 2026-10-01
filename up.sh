@@ -48,6 +48,8 @@ set_key MQTT_USER anx
 set_key MQTT_CA_FILE "/certs/ca.crt"
 set_key IPC_DOCKER_NETWORK anx-assets-ipc-network
 set_key ANX_TOPIC_PREFIX rasptank
+# Upright shoulder rest (stock mid 90° holds arm forward and overheats the servo).
+set_key ANX_ARM_REST_DEG 180
 
 # Self-signed TLS for https://:5000 and wss://:8888 (stock UI requires wss on HTTPS pages).
 TLS_DIR="${ROBOT_TLS_DIR:-$ROOT/data/certs}"

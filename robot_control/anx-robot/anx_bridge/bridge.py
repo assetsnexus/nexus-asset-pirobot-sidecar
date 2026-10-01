@@ -21,6 +21,7 @@ from .hardware import HardwareExecutor
 from .idle_police import StatusLightsController
 from .mqtt_bridge import MqttBridge
 from .mqtt_client import PahoSession
+from .servos import ensure_servos_armed, release_servos
 from .telemetry import build_telemetry
 
 logger = logging.getLogger(__name__)
@@ -45,15 +46,25 @@ def poke_node_heartbeat() -> None:
 
 
 def note_ui_control() -> None:
-    """Stock Adeept UI drove a command — clears idle police the same as MQTT/USB."""
+    """Stock Adeept UI drove a command — arm servos + clear idle lights."""
+    ensure_servos_armed(park_arm=True)
     if _status_lights is not None:
         _status_lights.note_control()
 
 
 def set_control_socket_clients(count: int) -> None:
-    """UI control WebSocket client count (0 = disconnected → red blink)."""
+    """UI control WebSocket client count.
+
+    Connected → arm servos (park shoulder upright) + blue status.
+    Disconnected → release PWM (limp) + red status.
+    """
+    connected = int(count) > 0
     if _status_lights is not None:
-        _status_lights.set_ws_connected(int(count) > 0)
+        _status_lights.set_ws_connected(connected)
+    if connected:
+        ensure_servos_armed(park_arm=True)
+    else:
+        release_servos()
 
 
 def release_line_sensors_for_vendor() -> None:

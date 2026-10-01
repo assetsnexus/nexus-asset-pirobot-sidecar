@@ -281,14 +281,39 @@ def _require_tls_context():
 def _run_wsgi(flask_app, *, host: str, port: int) -> None:
     """Serve Flask with enough concurrency for HTTPS UI + long-lived /video_feed.
 
-    Werkzeug's ``app.run(ssl_context=...)`` serialises TLS handshakes on the accept
-    thread. The browser then opens /video_feed (never ends) plus static assets and
-    every further request (and curl) stalls. gunicorn gthread accepts and handshakes
-    without that head-of-line block.
+    Werkzeug's ``app.run(ssl_context=...)`` can stall under browser load (MJPEG
+    /video_feed holds a worker). Prefer gunicorn gthread — but gunicorn's Arbiter
+    installs signal handlers and **must** run on the main thread. Vendor
+    ``webapp.startthread()`` runs Flask off-main; we therefore serve from
+    ``main()`` instead of that thread.
     """
+    import threading
+
     cert, key = tls_paths() if tls_enabled() else (None, None)
     use_tls = cert is not None and key is not None
     threads = int(os.environ.get("ANX_ROBOT_HTTP_THREADS", "16"))
+    on_main = threading.current_thread() is threading.main_thread()
+
+    def _werkzeug() -> None:
+        ssl_args = {"ssl_context": ssl_server_context()} if use_tls else {}
+        scheme = "https" if use_tls else "http"
+        _log.info(
+            "UI server %s://%s:%s (werkzeug threaded=%s)",
+            scheme,
+            host,
+            port,
+            True,
+        )
+        flask_app.run(host=host, port=port, threaded=True, **ssl_args)
+
+    if not on_main:
+        _log.warning(
+            "WSGI started off main thread — gunicorn cannot install signals; "
+            "using werkzeug (prefer serving from main())"
+        )
+        _werkzeug()
+        return
+
     try:
         from gunicorn.app.base import BaseApplication
     except Exception as exc:
@@ -296,8 +321,7 @@ def _run_wsgi(flask_app, *, host: str, port: int) -> None:
             "gunicorn unavailable (%s); falling back to werkzeug (may stall under browser load)",
             exc,
         )
-        ssl_args = {"ssl_context": ssl_server_context()} if use_tls else {}
-        flask_app.run(host=host, port=port, threaded=True, **ssl_args)
+        _werkzeug()
         return
 
     options = {
@@ -341,20 +365,24 @@ def _run_wsgi(flask_app, *, host: str, port: int) -> None:
     _App(flask_app, options).run()
 
 
-def _patch_webapp_for_tls(web) -> None:
-    """Vendor webapp.thread() calls app.run — replace with concurrent HTTPS WSGI."""
+def _http_port() -> int:
+    return int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
+
+
+def _vendor_flask_app():
+    flask_app = getattr(_vendor, "app", None) if _vendor is not None else None
+    return flask_app if flask_app is not None else app
+
+
+def _prepare_flask_ui() -> None:
+    """Validate TLS and log bind target (Flask is served from main, not startthread)."""
     if tls_enabled():
         _require_tls_context()
-    flask_app = getattr(_vendor, "app", None)
-    if flask_app is None:
-        return
-    http_port = int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
+    _log.info(
+        "Flask UI will serve on 0.0.0.0:%s via gunicorn (main thread)",
+        _http_port(),
+    )
 
-    def thread(_self=None):
-        _run_wsgi(flask_app, host="0.0.0.0", port=http_port)
-
-    web.thread = thread
-    _log.info("Flask UI will serve on 0.0.0.0:%s via gunicorn", http_port)
 
 
 def _start_adeept_control_websocket(flask_webapp) -> None:
@@ -416,23 +444,36 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
 
     ws_mod.flask_app = flask_webapp
     try:
-        from anx_bridge.servos import arm_rest_deg, park_arm_on_controllers
+        from anx_bridge.servos import (
+            arm_rest_deg,
+            register_servo_ctrl,
+            release_on_controllers,
+        )
 
-        # Vendor constructs many ServoCtrl() after scGear.moveInit(); re-park
-        # shoulder so the arm rests upright (90°) instead of holding forward.
-        park_arm_on_controllers(
-            (
-                getattr(ws_mod, "scGear", None),
-                getattr(ws_mod, "H1_sc", None),
-                getattr(ws_mod, "H2_sc", None),
-                getattr(ws_mod, "P_sc", None),
-                getattr(ws_mod, "T_sc", None),
-                getattr(ws_mod, "G_sc", None),
-            ),
-            deg=arm_rest_deg(),
+        # Vendor scGear.moveInit() drives mid poses and holds torque. Drop PWM
+        # immediately so servos stay limp until a control socket connects.
+        ctrls = (
+            getattr(ws_mod, "scGear", None),
+            getattr(ws_mod, "H1_sc", None),
+            getattr(ws_mod, "H2_sc", None),
+            getattr(ws_mod, "P_sc", None),
+            getattr(ws_mod, "T_sc", None),
+            getattr(ws_mod, "G_sc", None),
+        )
+        rest = arm_rest_deg()
+        for ctrl in ctrls:
+            if ctrl is None:
+                continue
+            register_servo_ctrl(ctrl)
+            if hasattr(ctrl, "initPos") and len(ctrl.initPos) > 0:
+                ctrl.initPos[0] = rest
+        release_on_controllers(ctrls)
+        _log.info(
+            "servos released after webServer import (idle until WS connect/control; arm rest init=%s°)",
+            rest,
         )
     except Exception as exc:
-        _log.warning("arm upright park after webServer import failed: %s", exc)
+        _log.warning("servo release after webServer import failed: %s", exc)
 
     # Overlay-only wrap: stock UI commands count as remote control for idle lights.
     try:
@@ -548,32 +589,21 @@ def main() -> None:
     _install_health()
     _install_ws_scheme_rewrite()
     _start_anx_bridge()
-    # Prefer the vendor webapp bootstrap (camera + Flask thread) when available.
+    # Prefer the vendor webapp bootstrap (camera object) when available.
+    # Serve Flask on the **main** thread so gunicorn can install signal handlers
+    # (vendor startthread() would put WSGI off-main and crash gunicorn).
     if _vendor is not None and hasattr(_vendor, "webapp"):
         web = _vendor.webapp()
-        _patch_webapp_for_tls(web)
+        _prepare_flask_ui()
         _start_adeept_control_websocket(web)
-        web.startthread()
-        # Keep the process alive on the non-daemon Flask thread.
-        import threading
-
-        flask_threads = [
-            t
-            for t in threading.enumerate()
-            if t is not threading.current_thread() and t.is_alive() and not t.daemon
-        ]
-        if flask_threads:
-            for t in flask_threads:
-                t.join()
-            return
-        # Fallback if Flask was marked daemon somehow.
-        threading.Event().wait()
+        _run_wsgi(_vendor_flask_app(), host="0.0.0.0", port=_http_port())
         return
-    port = int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
+    port = _http_port()
     _start_adeept_control_websocket(app)
     if tls_enabled():
         _require_tls_context()
     _run_wsgi(app, host="0.0.0.0", port=port)
+
 
 
 if __name__ == "__main__":

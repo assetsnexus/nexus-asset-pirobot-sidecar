@@ -1,27 +1,30 @@
-"""Servo rest poses for the RaspTank overlay (vendor RPIservo is not edited).
+"""Servo idle gate for the RaspTank overlay (vendor RPIservo is not edited).
 
-Channel 0 is the shoulder ("arm" / servo A). Stock ``moveInit()`` homes every
-servo to ``init_pwm*`` which defaults to **90°**. On this tank that mid pose
-holds the arm **parallel to the ground**, so the servo stalls and overheats.
+Stock ``moveInit()`` drives every channel to mid (90°). On this tank that holds
+the shoulder forward and overheats the servo. We:
 
-Park channel 0 at an upright rest angle on start. Default is **180°** (folded up
-away from the stock mid/forward 90° pose). Vendor ``initConfig`` rejects 0 and
-180 (exclusive bounds); we drive via ``setPWM`` / ``set_angle`` and still update
-``initPos`` so later ``home`` / ``moveAngle`` stay consistent.
-
-Override with ``ANX_ARM_REST_DEG`` (0–180) if the horn is mounted the other way.
+1. **Release** PCA9685 PWM (duty_cycle=0) after boot so servos stay limp until
+   a control socket connects or a motion command arrives.
+2. **Arm** on first connect/control: park shoulder at ``ANX_ARM_REST_DEG``
+   (default 0° upright on this horn mount), then leave normal control alone.
+3. **Release again** when the UI socket disconnects and control goes idle.
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
 ARM_CHANNEL = 0
-# Stock mid (90) is the forward stall pose on RaspTank; upright rest is 180°.
-_DEFAULT_ARM_REST_DEG = 180
+SERVO_CHANNELS = 8
+# Stock mid (90) holds the arm forward (stall). On this tank 180° drives past
+# the down stop; upright rest is the other extreme (0°).
+_DEFAULT_ARM_REST_DEG = 0
+
+_armed = False
+_primary_ctrl: Any = None
 
 
 def arm_rest_deg() -> int:
@@ -36,6 +39,48 @@ def arm_rest_deg() -> int:
     return max(0, min(180, deg))
 
 
+def servos_armed() -> bool:
+    return _armed
+
+
+def register_servo_ctrl(servo_ctrl: Any) -> None:
+    """Remember one live ServoCtrl that owns the shared PCA9685."""
+    global _primary_ctrl
+    if servo_ctrl is not None:
+        _primary_ctrl = servo_ctrl
+
+
+def release_servos(servo_ctrl: Any = None, *, channels: int = SERVO_CHANNELS) -> None:
+    """Drop PWM on servo channels so motors go limp (no holding torque)."""
+    global _armed
+    ctrl = servo_ctrl if servo_ctrl is not None else _primary_ctrl
+    if ctrl is None:
+        return
+    pwm = getattr(ctrl, "pwm_servo", None)
+    if pwm is None:
+        logger.debug("release_servos: no pwm_servo on ctrl")
+        return
+    released = 0
+    for i in range(channels):
+        try:
+            pwm.channels[i].duty_cycle = 0
+            released += 1
+        except Exception as exc:
+            logger.debug("release channel %s failed: %s", i, exc)
+    _armed = False
+    if hasattr(ctrl, "pause"):
+        try:
+            # Avoid vendor print spam when quieted; still clear the move flag.
+            flag = getattr(ctrl, "_ServoCtrl__flag", None)
+            if flag is not None:
+                flag.clear()
+            else:
+                ctrl.pause()
+        except Exception:
+            pass
+    logger.info("servos released (PWM off on %s channels) — idle until control", released)
+
+
 def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
     """Move shoulder (channel 0) to the upright rest angle and remember it as init."""
     if servo_ctrl is None:
@@ -45,7 +90,6 @@ def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
         before = None
         if hasattr(servo_ctrl, "nowPos") and len(servo_ctrl.nowPos) > ARM_CHANNEL:
             before = servo_ctrl.nowPos[ARM_CHANNEL]
-        # Prefer setPWM: vendor initConfig uses exclusive (0,180) and skips endpoints.
         if hasattr(servo_ctrl, "initPos") and len(servo_ctrl.initPos) > ARM_CHANNEL:
             servo_ctrl.initPos[ARM_CHANNEL] = target
         if hasattr(servo_ctrl, "setPWM"):
@@ -69,10 +113,44 @@ def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
         logger.exception("failed to park arm servo at %s°", target)
 
 
+def ensure_servos_armed(servo_ctrl: Any = None, *, park_arm: bool = True) -> None:
+    """Enable servos for control: park shoulder upright once, then leave PWM on."""
+    global _armed
+    ctrl = servo_ctrl if servo_ctrl is not None else _primary_ctrl
+    if ctrl is None:
+        return
+    register_servo_ctrl(ctrl)
+    if _armed:
+        return
+    if park_arm:
+        park_arm_upright(ctrl, deg=arm_rest_deg())
+    _armed = True
+    logger.info("servos armed for control")
+
+
+def release_servos_if_idle(*, connected: bool) -> None:
+    """When the UI socket is down, drop holding torque again."""
+    if connected:
+        return
+    if not _armed:
+        return
+    release_servos(_primary_ctrl)
+
+
 def park_arm_on_controllers(controllers: Iterable[Any], deg: int | None = None) -> None:
-    """Park shoulder once (PCA9685 is shared — repeating per ServoCtrl only stalls boot)."""
+    """Legacy helper — prefer ensure_servos_armed / release_servos."""
     for ctrl in controllers:
         if ctrl is None:
             continue
+        register_servo_ctrl(ctrl)
         park_arm_upright(ctrl, deg=deg)
+        return
+
+
+def release_on_controllers(controllers: Iterable[Any]) -> None:
+    for ctrl in controllers:
+        if ctrl is None:
+            continue
+        register_servo_ctrl(ctrl)
+        release_servos(ctrl)
         return

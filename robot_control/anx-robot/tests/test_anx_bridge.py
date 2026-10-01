@@ -509,9 +509,11 @@ def test_arm_rest_deg_clamped(monkeypatch):
     from anx_bridge.servos import arm_rest_deg, park_arm_upright
 
     monkeypatch.delenv("ANX_ARM_REST_DEG", raising=False)
-    assert arm_rest_deg() == 180
+    assert arm_rest_deg() == 0
     monkeypatch.setenv("ANX_ARM_REST_DEG", "200")
     assert arm_rest_deg() == 180
+    monkeypatch.setenv("ANX_ARM_REST_DEG", "-10")
+    assert arm_rest_deg() == 0
 
     class _Fake:
         def __init__(self):
@@ -524,9 +526,99 @@ def test_arm_rest_deg_clamped(monkeypatch):
             self.calls.append((channel, deg))
 
     fake = _Fake()
-    park_arm_upright(fake, deg=180)
-    assert fake.calls == [(0, 180)]
-    assert fake.initPos[0] == 180
+    park_arm_upright(fake, deg=0)
+    assert fake.calls == [(0, 0)]
+    assert fake.initPos[0] == 0
+
+
+def test_servos_idle_until_armed(monkeypatch):
+    """PWM stays released until ensure_servos_armed / stay released on disconnect."""
+    import anx_bridge.servos as servos
+
+    monkeypatch.delenv("ANX_ARM_REST_DEG", raising=False)
+
+    class _Ch:
+        def __init__(self):
+            self.duty_cycle = 4095
+
+    class _Pwm:
+        def __init__(self):
+            self.channels = [_Ch() for _ in range(8)]
+
+    class _Fake:
+        def __init__(self):
+            self.pwm_servo = _Pwm()
+            self.initPos = [90] * 8
+            self.nowPos = [90] * 8
+            self.set_calls = []
+
+        def setPWM(self, channel, deg):
+            self.nowPos[channel] = deg
+            self.set_calls.append((channel, deg))
+            self.pwm_servo.channels[channel].duty_cycle = 3000
+
+    # Reset module gate between tests.
+    servos._armed = False  # noqa: SLF001
+    servos._primary_ctrl = None  # noqa: SLF001
+
+    fake = _Fake()
+    servos.register_servo_ctrl(fake)
+    servos.release_servos(fake)
+    assert servos.servos_armed() is False
+    assert all(ch.duty_cycle == 0 for ch in fake.pwm_servo.channels)
+    assert fake.set_calls == []
+
+    servos.ensure_servos_armed(fake, park_arm=True)
+    assert servos.servos_armed() is True
+    assert fake.set_calls == [(0, 0)]
+    assert fake.initPos[0] == 0
+
+    # Idempotent while armed.
+    servos.ensure_servos_armed(fake, park_arm=True)
+    assert fake.set_calls == [(0, 0)]
+
+    servos.release_servos_if_idle(connected=True)
+    assert servos.servos_armed() is True
+    servos.release_servos_if_idle(connected=False)
+    assert servos.servos_armed() is False
+    assert all(ch.duty_cycle == 0 for ch in fake.pwm_servo.channels)
+
+
+def test_set_control_socket_clients_arms_and_releases(monkeypatch):
+    import anx_bridge.bridge as bridge
+    import anx_bridge.servos as servos
+
+    class _Ch:
+        def __init__(self):
+            self.duty_cycle = 100
+
+    class _Fake:
+        def __init__(self):
+            self.pwm_servo = type("P", (), {"channels": [_Ch() for _ in range(8)]})()
+            self.initPos = [90] * 8
+            self.nowPos = [90] * 8
+            self.parked = []
+
+        def setPWM(self, channel, deg):
+            self.nowPos[channel] = deg
+            self.parked.append((channel, deg))
+            self.pwm_servo.channels[channel].duty_cycle = 2000
+
+    servos._armed = False  # noqa: SLF001
+    servos._primary_ctrl = None  # noqa: SLF001
+    fake = _Fake()
+    servos.register_servo_ctrl(fake)
+    servos.release_servos(fake)
+
+    # Bridge may have no status lights in unit context.
+    bridge._status_lights = None  # noqa: SLF001
+    bridge.set_control_socket_clients(1)
+    assert servos.servos_armed() is True
+    assert fake.parked == [(0, 0)]
+
+    bridge.set_control_socket_clients(0)
+    assert servos.servos_armed() is False
+    assert all(ch.duty_cycle == 0 for ch in fake.pwm_servo.channels)
 
 
 def test_status_lights_red_disconnected_blue_connected():

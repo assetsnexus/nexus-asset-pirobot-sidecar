@@ -30,7 +30,14 @@ from .metric_slots import (
 from .motion import MotionController
 from .odometry import side_speeds_mps, speed_mps
 from .sensors import SensorSuite
-from .servos import arm_rest_deg, park_arm_upright
+from .servos import (
+    ARM_CHANNEL,
+    arm_rest_deg,
+    ensure_servos_armed,
+    park_arm_upright,
+    register_servo_ctrl,
+    release_servos,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +286,12 @@ class HardwareExecutor:
 
             _quiet_servo_prints(RPIservo.ServoCtrl)
             sc = RPIservo.ServoCtrl()
-            sc.moveInit()
-            # Shoulder (ch0) must rest upright; holding the arm forward stalls/overheats.
-            park_arm_upright(sc, deg=arm_rest_deg())
+            # Do not moveInit() — that drives mid (shoulder forward stall).
+            # Keep initPos upright for later home/park; leave PWM off until control.
+            if hasattr(sc, "initPos") and len(sc.initPos) > ARM_CHANNEL:
+                sc.initPos[ARM_CHANNEL] = arm_rest_deg()
+            register_servo_ctrl(sc)
+            release_servos(sc)
             sc.start()
             self._sc = sc
         except Exception:
@@ -414,6 +424,21 @@ class HardwareExecutor:
             ):
                 # Failsafe stops must not look like remote control (would cancel idle lights).
                 self._idle_police.note_control()
+        # Arm / camera / home need PWM; enable on first real servo command.
+        if action in (
+            "armUp",
+            "armDown",
+            "handUp",
+            "handDown",
+            "lookleft",
+            "lookright",
+            "grab",
+            "loose",
+            "up",
+            "down",
+            "home",
+        ):
+            ensure_servos_armed(self._sc, park_arm=True)
         if action in (
             "turn_left_90",
             "turn_right_90",
@@ -531,6 +556,7 @@ class HardwareExecutor:
         elif action == "UDstop":
             sc.stopWiggle()
         elif action == "home":
+            ensure_servos_armed(sc, park_arm=True)
             # moveServoInit expects a list of channel IDs.
             sc.moveServoInit(list(range(5)))
             park_arm_upright(sc, deg=arm_rest_deg())

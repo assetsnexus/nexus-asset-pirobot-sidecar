@@ -10,8 +10,16 @@
 # Image is built from this directory on `docker compose up`. No registry pull.
 # Bridge package lives in robot_control/anx-robot/anx_bridge (overlay); no second Mosquitto.
 
+# 3 x 100MB = 300MB of json logs per container.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "3"
+
 services:
   anx-robot:
+    logging: *default-logging
     build: .
     image: anx-robot-sidecar:local
     pull_policy: build

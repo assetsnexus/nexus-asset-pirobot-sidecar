@@ -16,8 +16,18 @@ import time
 from typing import Any, Optional
 
 from .config import OverlayMotionConfig
+from .metric_slots import (
+    SERVO_ARM,
+    SERVO_CAMERA,
+    SERVO_GRAB,
+    SERVO_HAND,
+    SERVO_LOOK,
+    SPEED_LEFT,
+    SPEED_RIGHT,
+    build_rasptank_metric_store,
+)
 from .motion import MotionController
-from .odometry import speed_mps
+from .odometry import side_speeds_mps, speed_mps
 from .sensors import SensorSuite
 
 logger = logging.getLogger(__name__)
@@ -138,6 +148,8 @@ class HardwareExecutor:
         self._distance_m = 0.0
         self._speed_mps = 0.0
         self._last_odom_t: Optional[float] = None
+        # Generic typed metric slots (range / boolean / speed); not name tables.
+        self._metrics = build_rasptank_metric_store()
         self._motion: Optional[MotionController] = None
         self._deadman = None
         self._publish_fast = None
@@ -295,6 +307,9 @@ class HardwareExecutor:
         self._last_odom_t = now
 
     def __call__(self, action: str, value: Any = None, steps: Any = None) -> None:
+        # Dry-run / live: update typed metric slots from action bindings.
+        # Hardware servo positions override range slots in _servo_telemetry.
+        self._metrics.apply_action(action)
         if action in (
             "turn_left_90",
             "turn_right_90",
@@ -502,24 +517,55 @@ class HardwareExecutor:
                 logger.debug("police_off failed: %s", exc)
         logger.info("robot action police_off (no WS2812)")
 
+    def _sample_hardware_servos(self) -> None:
+        """When the HAT is live, range slots track nowPos instead of dry-run nudges."""
+        if self._sc is None:
+            return
+        pos = getattr(self._sc, "nowPos", None)
+        if pos is None:
+            return
+        ids = (SERVO_ARM, SERVO_HAND, SERVO_LOOK, SERVO_GRAB, SERVO_CAMERA)
+        for i, metric_id in enumerate(ids):
+            if i >= len(pos):
+                break
+            try:
+                self._metrics.set_number(metric_id, float(pos[i]))
+            except (TypeError, ValueError):
+                pass
+
     def odometry_state(self) -> dict[str, Any]:
         self._tick_odometry()
         drive = "stop"
-        if self._direction == "forward":
+        if self._turn in ("left", "right"):
+            drive = self._turn
+        elif self._direction == "forward":
             drive = "forward"
         elif self._direction == "backward":
             drive = "backward"
-        elif self._turn in ("left", "right"):
-            drive = self._turn
-        return {
-            "speed_mps": self._speed_mps,
+        left_mps, right_mps = side_speeds_mps(
+            self._speed if drive != "stop" else 0,
+            self._direction,
+            self._turn,
+            self._motion_cfg.speed_at_full_pwm_mps,
+        )
+        if drive == "stop":
+            left_mps = 0.0
+            right_mps = 0.0
+        self._metrics.set_number(SPEED_LEFT, left_mps)
+        self._metrics.set_number(SPEED_RIGHT, right_mps)
+        self._sample_hardware_servos()
+        published = self._metrics.publish_map()
+        state = {
+            "speed_mps": self._speed_mps if drive != "stop" else 0.0,
             "distance_m": self._distance_m,
             "odometry_source": "open_loop_pwm",
             "speed_setting": self._speed,
             "drive_direction": drive,
-            "motor_left_speed": self._speed if drive != "stop" else 0,
-            "motor_right_speed": self._speed if drive != "stop" else 0,
+            "motor_left_speed": self._speed if left_mps else 0,
+            "motor_right_speed": self._speed if right_mps else 0,
         }
+        state.update(published)
+        return state
 
 
 def build_sample_fn(executor: Optional[HardwareExecutor] = None):

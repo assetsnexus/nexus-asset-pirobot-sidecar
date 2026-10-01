@@ -124,8 +124,30 @@ def test_telemetry_shape():
     assert body["distance_mm"] == 250.0
     assert body["speed_mps"] == 0.1
     assert body["distance_m"] == 1.2
+    assert "motor_left_speed_mps" in body
+    assert "motor_right_speed_mps" in body
+    assert "servo_arm_deg" in body
+    assert "servo_camera_deg" in body
+    assert "lights_police" in body
     assert body["odometry_source"] == "open_loop_pwm"
     assert body["battery_voltage_v"] == 7.8
+
+
+def test_side_speeds_are_signed_per_motor():
+    from anx_bridge.odometry import side_speeds_mps
+
+    left, right = side_speeds_mps(100, "forward", "no", 0.35)
+    assert left == pytest.approx(0.35)
+    assert right == pytest.approx(0.35)
+    left, right = side_speeds_mps(100, "backward", "no", 0.35)
+    assert left == pytest.approx(-0.35)
+    assert right == pytest.approx(-0.35)
+    left, right = side_speeds_mps(100, "forward", "left", 0.35)
+    assert left == pytest.approx(-0.35)
+    assert right == pytest.approx(0.35)
+    left, right = side_speeds_mps(0, "forward", "no", 0.35)
+    assert left == 0
+    assert right == 0
 
 
 def test_wheel_circumference_and_turn_time():

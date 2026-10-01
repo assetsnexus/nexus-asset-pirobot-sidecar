@@ -6,9 +6,12 @@ WORKDIR /app
 
 # evdev builds a C extension. linux-libc-dev supplies linux/input.h and
 # linux/input-event-codes.h. gcc and libc6-dev compile it.
-# liblgpio-dev is not in Debian bookworm; it is in the Raspberry Pi archive.
+# liblgpio-dev / picamera2 / libcamera come from the Raspberry Pi archive.
 # raspi-utils-core provides pinctrl, used to take GPIO 9 and 11 back from SPI.
 # Host kernel headers (linux-headers-$(uname -r)) are not in this image.
+#
+# Adeept web/app.py imports camera_opencv at load time (cv2, picamera2, numpy).
+# Without those packages the overlay falls back to static UI + /health and video fails.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
   && curl -fsSL https://archive.raspberrypi.org/debian/raspberrypi.gpg.key \
@@ -17,8 +20,14 @@ RUN apt-get update \
     > /etc/apt/sources.list.d/raspi.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends \
-    gcc libc6-dev linux-libc-dev swig liblgpio1 liblgpio-dev libgpiod2 raspi-utils-core \
+    gcc libc6-dev linux-libc-dev swig \
+    liblgpio1 liblgpio-dev libgpiod2 raspi-utils-core \
+    python3-opencv python3-numpy python3-picamera2 python3-libcamera \
+    python3-kms++ python3-prctl libcap2 libglib2.0-0 \
   && rm -rf /var/lib/apt/lists/*
+
+# System Bookworm packages install into dist-packages; this image's Python is also 3.11.
+ENV PYTHONPATH=/usr/lib/python3/dist-packages:/overlay
 
 # Upstream f5fe667 ships no requirements.txt. Flask + bridge deps live in the overlay.
 COPY robot_control/anx-robot/requirements-bridge.txt /overlay/requirements-bridge.txt
@@ -31,7 +40,6 @@ COPY robot_control/anx-robot/anx_bridge /overlay/anx_bridge
 
 ENV PYTHONUNBUFFERED=1
 ENV ANX_ROBOT_WEB_DIR=/app
-ENV PYTHONPATH=/overlay
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=40s \

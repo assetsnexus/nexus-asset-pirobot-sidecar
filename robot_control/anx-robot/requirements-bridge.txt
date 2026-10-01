@@ -1,9 +1,12 @@
 # Overlay runtime. Upstream adeept_rasptank2@f5fe667 has no requirements.txt.
 # `board` comes from adafruit-blinka (vendor move.py). gpiozero drives the LEDs.
+# OpenCV / numpy / picamera2 are installed from the Raspberry Pi apt archive in
+# the Dockerfile (PYTHONPATH=/usr/lib/python3/dist-packages). imutils is pip-only.
 flask>=2.0
 flask-cors>=3.0
 paho-mqtt>=2
 evdev
+imutils
 adafruit-blinka
 adafruit-circuitpython-pca9685
 adafruit-circuitpython-motor

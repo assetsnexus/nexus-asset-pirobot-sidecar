@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 _OVERLAY_DIR = Path(__file__).resolve().parent
 _WEB_DIR = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "")).resolve() if os.environ.get("ANX_ROBOT_WEB_DIR") else (
@@ -42,20 +42,60 @@ def _load_vendor_app():
     global _vendor, app
     spec = importlib.util.spec_from_file_location("adeept_rasptank2_web_app", _WEB_DIR / "app.py")
     if spec is None or spec.loader is None:
-        _log.warning("vendor app.py could not be loaded; serving /health only")
+        _log.warning("vendor app.py could not be loaded; serving static UI + /health")
         return
     module = importlib.util.module_from_spec(spec)
     sys.modules["adeept_rasptank2_web_app"] = module
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
-        _log.warning("vendor app.py failed to import (%s); serving /health only", exc)
+        _log.warning("vendor app.py failed to import (%s); serving static UI + /health", exc)
         return
     if not hasattr(module, "app"):
-        _log.warning("vendor app.py has no Flask app; serving /health only")
+        _log.warning("vendor app.py has no Flask app; serving static UI + /health")
         return
     _vendor = module
     app = module.app
+
+
+def _install_static_fallback() -> None:
+    """Serve Adeept dist/ when the camera stack failed to import (no blank 404 on /)."""
+    if _vendor is not None:
+        return
+    dist = _WEB_DIR / "dist"
+    if not dist.is_dir():
+        _log.warning("vendor dist/ missing at %s; only /health will answer", dist)
+        return
+
+    @app.route("/")
+    def index():
+        return send_from_directory(dist, "index.html")
+
+    @app.route("/js/<path:filename>")
+    def sendjs(filename):
+        return send_from_directory(dist / "js", filename)
+
+    @app.route("/css/<path:filename>")
+    def sendcss(filename):
+        return send_from_directory(dist / "css", filename)
+
+    @app.route("/fonts/<path:filename>")
+    def sendfonts(filename):
+        return send_from_directory(dist / "fonts", filename)
+
+    @app.route("/api/img/<path:filename>")
+    def sendimg(filename):
+        return send_from_directory(dist / "img", filename)
+
+    @app.route("/api/img/icon/<path:filename>")
+    def sendicon(filename):
+        return send_from_directory(dist / "img" / "icon", filename)
+
+    @app.route("/<path:filename>")
+    def sendgen(filename):
+        return send_from_directory(dist, filename)
+
+    _log.info("static Adeept UI mounted from %s (camera/vendor import unavailable)", dist)
 
 
 def _install_health() -> None:
@@ -96,6 +136,7 @@ def _start_anx_bridge() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     _load_vendor_app()
+    _install_static_fallback()
     _install_health()
     _start_anx_bridge()
     # Prefer the vendor webapp bootstrap (camera + Flask thread) when available.

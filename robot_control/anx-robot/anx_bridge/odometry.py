@@ -14,6 +14,29 @@ def wheel_circumference_m(wheel_diameter_m: float = DEFAULT_WHEEL_DIAMETER_M) ->
     return math.pi * wheel_diameter_m
 
 
+def side_speeds_mps(
+    pwm: float,
+    direction: str,
+    turn: str,
+    speed_at_full_pwm_mps: float = DEFAULT_SPEED_AT_FULL_PWM_MPS,
+) -> tuple[float, float]:
+    """Signed ground speed for the left and right sides (m/s).
+
+    Straight drive matches both sides. In-place spin (turn left/right) reverses
+    one side, same as vendor move(). More axles can reuse this pair pattern.
+    """
+    v = speed_mps(pwm, speed_at_full_pwm_mps)
+    if turn == "left":
+        return -v, v
+    if turn == "right":
+        return v, -v
+    if direction == "backward":
+        return -v, -v
+    if direction == "forward":
+        return v, v
+    return 0.0, 0.0
+
+
 def speed_mps(pwm: float, speed_at_full_pwm_mps: float = DEFAULT_SPEED_AT_FULL_PWM_MPS) -> float:
     """Ground speed from open-loop PWM (0–100)."""
     try:

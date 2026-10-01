@@ -41,6 +41,8 @@ def build_telemetry(
         "odometry_source": state.get("odometry_source", "open_loop_pwm"),
         "motor_left_speed": state.get("motor_left_speed", 0),
         "motor_right_speed": state.get("motor_right_speed", 0),
+        "motor_left_speed_mps": state.get("motor_left_speed_mps", 0.0),
+        "motor_right_speed_mps": state.get("motor_right_speed_mps", 0.0),
         "drive_direction": state.get("drive_direction", "stop"),
         "speed_setting": state.get("speed_setting", 0),
         "servo_arm_deg": state.get("servo_arm_deg"),
@@ -55,6 +57,7 @@ def build_telemetry(
         "switch_1": bool(state.get("switch_1", False)),
         "switch_2": bool(state.get("switch_2", False)),
         "switch_3": bool(state.get("switch_3", False)),
+        "lights_police": bool(state.get("lights_police", False)),
         "control_source": control_source,
         "deadman_trips_total": deadman_trips,
     }

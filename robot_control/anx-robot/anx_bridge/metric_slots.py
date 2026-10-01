@@ -161,21 +161,26 @@ SPEED_RIGHT = "robot.drive.motor.right.speed_mps"
 
 def build_rasptank_metric_store(step_deg: float = 8.0) -> MetricStore:
     """Vendor action bindings → generic slots for the Adeept RaspTank overlay."""
+    from .servo_limits import RASPTANK_SERVO_LIMITS
+
     store = MetricStore()
-    for metric_id, publish_key in (
-        (SERVO_ARM, "servo_arm_deg"),
-        (SERVO_HAND, "servo_hand_deg"),
-        (SERVO_LOOK, "servo_look_deg"),
-        (SERVO_GRAB, "servo_grab_deg"),
-        (SERVO_CAMERA, "servo_camera_deg"),
-    ):
+    channel_to_metric = {
+        0: (SERVO_ARM, "servo_arm_deg"),
+        1: (SERVO_HAND, "servo_hand_deg"),
+        2: (SERVO_LOOK, "servo_look_deg"),
+        3: (SERVO_GRAB, "servo_grab_deg"),
+        4: (SERVO_CAMERA, "servo_camera_deg"),
+    }
+    for channel, (metric_id, publish_key) in channel_to_metric.items():
+        lim = RASPTANK_SERVO_LIMITS[channel]
+        rest = float(lim.rest_deg)
         store.define(
             MetricSlot(
                 metric_id=metric_id,
                 kind=MetricKind.RANGE,
-                rest=90.0,
-                min_v=0.0,
-                max_v=180.0,
+                rest=rest,
+                min_v=float(lim.min_deg),
+                max_v=float(lim.max_deg),
                 unit="deg",
                 publish_key=publish_key,
             )

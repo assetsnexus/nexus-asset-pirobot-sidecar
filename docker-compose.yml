@@ -38,7 +38,7 @@ services:
       - ANX_BRIDGE_ENABLED=${ANX_BRIDGE_ENABLED:-true}
       - ANX_CONTROL_SOURCE=${ANX_CONTROL_SOURCE:-auto}
       - ANX_DEADMAN_MS=${ANX_DEADMAN_MS:-500}
-      - ANX_ARM_REST_DEG=${ANX_ARM_REST_DEG:-0}
+      - ANX_ARM_REST_DEG=${ANX_ARM_REST_DEG:-45}
       - ANX_IDLE_POLICE=${ANX_IDLE_POLICE:-true}
       - ANX_IDLE_POLICE_MS=${ANX_IDLE_POLICE_MS:-3000}
       - ANX_TOPIC_PREFIX=${ANX_TOPIC_PREFIX:-rasptank}
@@ -76,3 +76,5 @@ services:
     # /dev/gpiochip* (lgpio), /dev/i2c-* (PCA9685), and /dev/video*+/dev/media*
     # (libcamera / Picamera2).
     privileged: true
+    stop_grace_period: 20s
+    stop_signal: SIGTERM

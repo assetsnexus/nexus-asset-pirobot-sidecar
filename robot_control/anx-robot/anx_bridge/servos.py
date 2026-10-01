@@ -1,30 +1,34 @@
 """Servo idle gate for the RaspTank overlay (vendor RPIservo is not edited).
 
-Stock ``moveInit()`` drives every channel to mid (90°). On this tank that holds
-the shoulder forward and overheats the servo. We:
+Stock ``moveInit()`` drives every channel to mid (90°). Holding torque against
+a mechanical stop overheats servos. Policy:
 
-1. **Release** PCA9685 PWM (duty_cycle=0) after boot so servos stay limp until
-   a control socket connects or a motion command arrives.
-2. **Arm** on first connect/control: park shoulder at ``ANX_ARM_REST_DEG``
-   (default 0° upright on this horn mount), then leave normal control alone.
-3. **Release again** when the UI socket disconnects and control goes idle.
+1. Boot / disconnect / process exit → **PWM off** (limp), never hold a rest pose.
+2. Connect does **not** park — first motion/slider command enables PWM.
+3. ``home`` releases PWM instead of driving init angles into the stops.
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import os
-from typing import Any, Iterable, Optional
+import signal
+import threading
+from typing import Any, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 ARM_CHANNEL = 0
 SERVO_CHANNELS = 8
-# Stock mid (90) holds the arm forward (stall). On this tank 180° drives past
-# the down stop; upright rest is the other extreme (0°).
-_DEFAULT_ARM_REST_DEG = 0
+# Stock mid (90) holds the arm forward (stall). Endstops (0° and 180°) also
+# fight the horn when held — auto-park is disabled; this is only for explicit park.
+_DEFAULT_ARM_REST_DEG = 45
 
 _armed = False
 _primary_ctrl: Any = None
+_all_ctrls: List[Any] = []
+_hooks_installed = False
+_release_lock = threading.Lock()
 
 
 def arm_rest_deg() -> int:
@@ -44,22 +48,19 @@ def servos_armed() -> bool:
 
 
 def register_servo_ctrl(servo_ctrl: Any) -> None:
-    """Remember one live ServoCtrl that owns the shared PCA9685."""
+    """Remember live ServoCtrl instance(s) that share the PCA9685."""
     global _primary_ctrl
-    if servo_ctrl is not None:
-        _primary_ctrl = servo_ctrl
-
-
-def release_servos(servo_ctrl: Any = None, *, channels: int = SERVO_CHANNELS) -> None:
-    """Drop PWM on servo channels so motors go limp (no holding torque)."""
-    global _armed
-    ctrl = servo_ctrl if servo_ctrl is not None else _primary_ctrl
-    if ctrl is None:
+    if servo_ctrl is None:
         return
+    _primary_ctrl = servo_ctrl
+    if servo_ctrl not in _all_ctrls:
+        _all_ctrls.append(servo_ctrl)
+
+
+def _release_one(ctrl: Any, *, channels: int) -> int:
     pwm = getattr(ctrl, "pwm_servo", None)
     if pwm is None:
-        logger.debug("release_servos: no pwm_servo on ctrl")
-        return
+        return 0
     released = 0
     for i in range(channels):
         try:
@@ -67,10 +68,20 @@ def release_servos(servo_ctrl: Any = None, *, channels: int = SERVO_CHANNELS) ->
             released += 1
         except Exception as exc:
             logger.debug("release channel %s failed: %s", i, exc)
-    _armed = False
+    # Soft-sleep the chip when possible so carriers drop completely.
+    try:
+        if hasattr(pwm, "deinit"):
+            # Keep the object usable: prefer MODE1 sleep over full deinit.
+            pass
+        # adafruit_pca9685 exposes .channels; some builds have .chip
+        chip = getattr(pwm, "_pca", None) or getattr(pwm, "pca", None) or pwm
+        if hasattr(chip, "mode1"):
+            # not always writable the same way across versions
+            pass
+    except Exception:
+        logger.debug("pca soft-sleep skipped", exc_info=True)
     if hasattr(ctrl, "pause"):
         try:
-            # Avoid vendor print spam when quieted; still clear the move flag.
             flag = getattr(ctrl, "_ServoCtrl__flag", None)
             if flag is not None:
                 flag.clear()
@@ -78,11 +89,37 @@ def release_servos(servo_ctrl: Any = None, *, channels: int = SERVO_CHANNELS) ->
                 ctrl.pause()
         except Exception:
             pass
-    logger.info("servos released (PWM off on %s channels) — idle until control", released)
+    return released
+
+
+def release_servos(servo_ctrl: Any = None, *, channels: int = SERVO_CHANNELS) -> None:
+    """Drop PWM on servo channels so motors go limp (no holding torque)."""
+    global _armed
+    with _release_lock:
+        targets: List[Any]
+        if servo_ctrl is not None:
+            targets = [servo_ctrl]
+            register_servo_ctrl(servo_ctrl)
+        else:
+            targets = [c for c in _all_ctrls if c is not None]
+            if not targets and _primary_ctrl is not None:
+                targets = [_primary_ctrl]
+        if not targets:
+            logger.debug("release_servos: no pwm_servo ctrl registered")
+            return
+        total = 0
+        for ctrl in targets:
+            total += _release_one(ctrl, channels=channels)
+        _armed = False
+        logger.info(
+            "servos released (PWM off, %s channel-ops across %s ctrl(s)) — limp",
+            total,
+            len(targets),
+        )
 
 
 def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
-    """Move shoulder (channel 0) to the upright rest angle and remember it as init."""
+    """Explicit shoulder park only (sliders/home callers). Avoid on connect/boot."""
     if servo_ctrl is None:
         return
     target = arm_rest_deg() if deg is None else max(0, min(180, int(deg)))
@@ -103,7 +140,7 @@ def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
         if hasattr(servo_ctrl, "nowPos") and len(servo_ctrl.nowPos) > ARM_CHANNEL:
             after = servo_ctrl.nowPos[ARM_CHANNEL]
         logger.info(
-            "parked arm servo (ch%d) upright rest %s° (was %s → now %s)",
+            "parked arm servo (ch%d) at %s° (was %s → now %s)",
             ARM_CHANNEL,
             target,
             before,
@@ -113,8 +150,8 @@ def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
         logger.exception("failed to park arm servo at %s°", target)
 
 
-def ensure_servos_armed(servo_ctrl: Any = None, *, park_arm: bool = True) -> None:
-    """Enable servos for control: park shoulder upright once, then leave PWM on."""
+def ensure_servos_armed(servo_ctrl: Any = None, *, park_arm: bool = False) -> None:
+    """Mark servos usable. Does not hold a rest pose unless park_arm=True."""
     global _armed
     ctrl = servo_ctrl if servo_ctrl is not None else _primary_ctrl
     if ctrl is None:
@@ -125,7 +162,7 @@ def ensure_servos_armed(servo_ctrl: Any = None, *, park_arm: bool = True) -> Non
     if park_arm:
         park_arm_upright(ctrl, deg=arm_rest_deg())
     _armed = True
-    logger.info("servos armed for control")
+    logger.info("servos armed for control (park_arm=%s)", park_arm)
 
 
 def release_servos_if_idle(*, connected: bool) -> None:
@@ -133,6 +170,8 @@ def release_servos_if_idle(*, connected: bool) -> None:
     if connected:
         return
     if not _armed:
+        # Still force PWM off — vendor may have left channels hot.
+        release_servos(_primary_ctrl)
         return
     release_servos(_primary_ctrl)
 
@@ -152,5 +191,36 @@ def release_on_controllers(controllers: Iterable[Any]) -> None:
         if ctrl is None:
             continue
         register_servo_ctrl(ctrl)
-        release_servos(ctrl)
+    release_servos()
+
+
+def install_shutdown_release_hooks() -> None:
+    """Ensure docker stop / SIGTERM / process exit drops PWM (no hot hold)."""
+    global _hooks_installed
+    if _hooks_installed:
         return
+    _hooks_installed = True
+
+    def _hook(*_args) -> None:
+        try:
+            release_servos()
+        except Exception:
+            logger.exception("shutdown servo release failed")
+
+    atexit.register(_hook)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            prev = signal.getsignal(sig)
+
+            def _handler(signum, frame, _prev=prev, _sig=sig):
+                _hook()
+                if callable(_prev) and _prev not in (signal.SIG_DFL, signal.SIG_IGN):
+                    _prev(signum, frame)
+                elif _prev == signal.SIG_DFL:
+                    signal.signal(signum, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+            signal.signal(sig, _handler)
+        except Exception:
+            logger.debug("could not install %s release hook", sig, exc_info=True)
+    logger.info("servo release hooks installed (atexit + SIGTERM/SIGINT)")

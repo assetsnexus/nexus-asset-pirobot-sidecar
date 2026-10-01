@@ -509,7 +509,7 @@ def test_arm_rest_deg_clamped(monkeypatch):
     from anx_bridge.servos import arm_rest_deg, park_arm_upright
 
     monkeypatch.delenv("ANX_ARM_REST_DEG", raising=False)
-    assert arm_rest_deg() == 0
+    assert arm_rest_deg() == 45
     monkeypatch.setenv("ANX_ARM_REST_DEG", "200")
     assert arm_rest_deg() == 180
     monkeypatch.setenv("ANX_ARM_REST_DEG", "-10")
@@ -526,9 +526,9 @@ def test_arm_rest_deg_clamped(monkeypatch):
             self.calls.append((channel, deg))
 
     fake = _Fake()
-    park_arm_upright(fake, deg=0)
-    assert fake.calls == [(0, 0)]
-    assert fake.initPos[0] == 0
+    park_arm_upright(fake, deg=45)
+    assert fake.calls == [(0, 45)]
+    assert fake.initPos[0] == 45
 
 
 def test_servos_idle_until_armed(monkeypatch):
@@ -570,12 +570,12 @@ def test_servos_idle_until_armed(monkeypatch):
 
     servos.ensure_servos_armed(fake, park_arm=True)
     assert servos.servos_armed() is True
-    assert fake.set_calls == [(0, 0)]
-    assert fake.initPos[0] == 0
+    assert fake.set_calls == [(0, 45)]
+    assert fake.initPos[0] == 45
 
     # Idempotent while armed.
     servos.ensure_servos_armed(fake, park_arm=True)
-    assert fake.set_calls == [(0, 0)]
+    assert fake.set_calls == [(0, 45)]
 
     servos.release_servos_if_idle(connected=True)
     assert servos.servos_armed() is True
@@ -613,9 +613,12 @@ def test_set_control_socket_clients_arms_and_releases(monkeypatch):
     # Bridge may have no status lights in unit context.
     bridge._status_lights = None  # noqa: SLF001
     bridge.set_control_socket_clients(1)
-    assert servos.servos_armed() is True
-    assert fake.parked == [(0, 0)]
+    # Connect must NOT park / arm — limp until a real command.
+    assert servos.servos_armed() is False
+    assert fake.parked == []
 
+    servos.ensure_servos_armed(fake, park_arm=False)
+    assert servos.servos_armed() is True
     bridge.set_control_socket_clients(0)
     assert servos.servos_armed() is False
     assert all(ch.duty_cycle == 0 for ch in fake.pwm_servo.channels)

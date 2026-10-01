@@ -38,6 +38,7 @@ COPY robot_control/adeept_rasptank2/web /app
 COPY robot_control/anx-robot/anx_web_entry.py /overlay/anx_web_entry.py
 COPY robot_control/anx-robot/anx_tls.py /overlay/anx_tls.py
 COPY robot_control/anx-robot/anx_bridge /overlay/anx_bridge
+COPY robot_control/anx-robot/static /overlay/static
 
 ENV PYTHONUNBUFFERED=1
 ENV ANX_ROBOT_WEB_DIR=/app

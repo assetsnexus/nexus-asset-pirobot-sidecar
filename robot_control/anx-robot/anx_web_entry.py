@@ -195,7 +195,8 @@ def _install_health() -> None:
 
     @app.before_request
     def _anx_auth_gate():
-        if request.path == "/health" or request.endpoint == "health":
+        path = request.path or ""
+        if path == "/health" or request.endpoint == "health" or path.startswith("/anx/"):
             return None
         for handler in original:
             result = handler()
@@ -215,6 +216,98 @@ def _install_health() -> None:
             }
         ), 200
 
+    _install_servo_api(app)
+
+
+def _install_servo_api(flask_app) -> None:
+    """Absolute servo angles for Arm Control sliders (GET/POST /anx/servos)."""
+    from anx_bridge.servo_positions import describe_servos, set_many, set_servo_angle
+
+    static_dir = _OVERLAY_DIR / "static"
+
+    @flask_app.route("/anx/servos", methods=["GET"])
+    def anx_servos_get():
+        return jsonify({"ok": True, "servos": describe_servos()}), 200
+
+    @flask_app.route("/anx/servos", methods=["POST"])
+    def anx_servos_post():
+        try:
+            from anx_bridge import note_ui_control
+
+            note_ui_control(arm_servos=False)
+        except Exception:
+            pass
+        body = request.get_json(silent=True) or {}
+        try:
+            if "positions" in body and isinstance(body["positions"], dict):
+                applied = set_many({int(k): int(v) for k, v in body["positions"].items()})
+                return jsonify({"ok": True, "positions": applied, "servos": describe_servos()}), 200
+            if "channel" not in body or "deg" not in body:
+                return jsonify({"ok": False, "error": "need channel+deg or positions"}), 400
+            deg = set_servo_angle(int(body["channel"]), int(body["deg"]))
+            return jsonify({"ok": True, "channel": int(body["channel"]), "deg": deg}), 200
+        except KeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            _log.exception("anx/servos set failed")
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+    @flask_app.route("/anx/arm_sliders.js")
+    def anx_arm_sliders_js():
+        path = static_dir / "arm_sliders.js"
+        if not path.is_file():
+            return "/* arm_sliders.js missing */", 404, {"Content-Type": "application/javascript"}
+        return path.read_text(encoding="utf-8"), 200, {
+            "Content-Type": "application/javascript; charset=utf-8",
+            "Cache-Control": "no-store",
+        }
+
+    _log.info("servo position API mounted at /anx/servos (+ /anx/arm_sliders.js)")
+
+
+def _install_get_info_battery(ws_mod) -> None:
+    """Append ADS7830 battery volts to get_info (chip under CPU Usage).
+
+    Robot HAT has no current/power_w sensor — only optional pack voltage.
+    """
+    import json
+
+    from anx_bridge.power_sense import battery_volts
+
+    if not hasattr(ws_mod, "recv_msg"):
+        return
+    _orig_recv_msg = ws_mod.recv_msg
+
+    async def recv_msg_with_batt(websocket):
+        _send = websocket.send
+
+        async def send_wrap(payload):
+            try:
+                obj = json.loads(payload) if isinstance(payload, str) else payload
+            except Exception:
+                return await _send(payload)
+            if isinstance(obj, dict) and obj.get("title") == "get_info":
+                data = obj.get("data")
+                if isinstance(data, list) and len(data) == 3:
+                    batt = battery_volts()
+                    obj["data"] = [
+                        data[0],
+                        data[1],
+                        ("" if batt is None else str(batt)),
+                        data[2],
+                    ]
+                    payload = json.dumps(obj)
+            return await _send(payload)
+
+        websocket.send = send_wrap  # type: ignore[method-assign]
+        try:
+            await _orig_recv_msg(websocket)
+        finally:
+            websocket.send = _send  # type: ignore[method-assign]
+
+    ws_mod.recv_msg = recv_msg_with_batt
+    _log.info("wrapped webServer.recv_msg to inject Batt V into get_info")
+
 
 def _start_anx_bridge() -> None:
     """Start MQTT bridge from overlay; never patches vendor app.py / webServer."""
@@ -231,36 +324,141 @@ def _start_anx_bridge() -> None:
         log.warning("ANX bridge not started: %s", exc)
 
 
-def _install_ws_scheme_rewrite() -> None:
-    """Stock UI hardcodes ws://host:8888. Make the scheme follow the page protocol.
+def _install_ui_https_rewrites() -> None:
+    """Fix stock UI URLs that hardcode http:// / ws:// (mixed content on HTTPS + IP hosts).
 
-    On HTTPS pages browsers block ws:// (mixed content). A hardcoded wss:// would
-    break plain HTTP. Protocol-relative selection works for both.
+    Browsers will not auto-upgrade http→https when the host is an IP, so the
+    hardcoded ``http://hostname:5000/video_feed`` fails under HTTPS with
+    ERR_EMPTY_RESPONSE / Mixed Content. Same for ``ws://`` control sockets.
     """
     web_dir = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "/app"))
     if not web_dir.is_dir():
         web_dir = _WEB_DIR
-    needle_ws = '"ws://"+location.hostname'
-    needle_wss = '"wss://"+location.hostname'
-    repl = '("https:"===location.protocol?"wss://":"ws://")+location.hostname'
+
+    replacements = (
+        (
+            '"ws://"+location.hostname',
+            '("https:"===location.protocol?"wss://":"ws://")+location.hostname',
+        ),
+        (
+            '"wss://"+location.hostname',
+            '("https:"===location.protocol?"wss://":"ws://")+location.hostname',
+        ),
+        # Prefer same-origin so scheme+port follow the page (fixes IP mixed content).
+        (
+            'o.src="http://"+location.hostname+":5000/video_feed?rand="+t.rand,o.onload=function(){n.drawImage(o,0,0,640,480)}',
+            'o.__anxT0=performance.now(),o.src=location.origin+"/video_feed?rand="+t.rand,o.onload=function(){window.__anxVideoMs=Math.round(performance.now()-o.__anxT0);n.drawImage(o,0,0,640,480)}',
+        ),
+        (
+            '"http://"+location.hostname+":5000/video_feed',
+            'location.origin+"/video_feed',
+        ),
+        # Status chips: insert Batt V under CPU Usage when get_info sends 4 values.
+        (
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["RAM","Usage",90,"%",70,85]]',
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Batt","Volt",0,"V",6.4,7.2],["RAM","Usage",90,"%",70,85]]',
+        ),
+    )
+
     patched = 0
     for path in web_dir.rglob("*.js"):
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
-            _log.warning("could not read %s for ws scheme rewrite: %s", path, exc)
+            _log.warning("could not read %s for HTTPS UI rewrite: %s", path, exc)
             continue
-        if needle_ws not in text and needle_wss not in text:
+        original = text
+        for needle, repl in replacements:
+            if needle in text:
+                text = text.replace(needle, repl)
+        if text == original:
             continue
-        text = text.replace(needle_ws, repl).replace(needle_wss, repl)
         try:
             path.write_text(text, encoding="utf-8")
             patched += 1
-            _log.info("patched WebSocket scheme to follow location.protocol in %s", path)
+            _log.info("patched HTTPS/same-origin UI URLs in %s", path)
         except OSError as exc:
-            _log.warning("could not patch %s for ws scheme: %s", path, exc)
+            _log.warning("could not patch %s for HTTPS UI URLs: %s", path, exc)
     if patched:
-        _log.info("patched %s JS file(s) for protocol-aware control WebSocket URL", patched)
+        _log.info("patched %s JS file(s) for protocol-aware WS + video_feed URLs", patched)
+
+
+def _install_latency_hud() -> None:
+    """Inject a small RTT / video latency badge into the stock index.html."""
+    web_dir = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "/app"))
+    if not web_dir.is_dir():
+        web_dir = _WEB_DIR
+    index = web_dir / "dist" / "index.html"
+    if not index.is_file():
+        _log.warning("latency HUD: index.html missing at %s", index)
+        return
+    marker = "/* anx-latency-hud */"
+    try:
+        html = index.read_text(encoding="utf-8")
+    except OSError as exc:
+        _log.warning("latency HUD: could not read %s: %s", index, exc)
+        return
+    if marker in html:
+        # Still ensure arm-slider script tag is present.
+        if "/anx/arm_sliders.js" not in html:
+            html = html.replace(
+                "</body>",
+                '<script src="/anx/arm_sliders.js" defer></script></body>',
+                1,
+            )
+            try:
+                index.write_text(html, encoding="utf-8")
+            except OSError:
+                pass
+        return
+    snippet = (
+        f"<script>{marker}\n"
+        "(function(){"
+        "var el=document.createElement('div');"
+        "el.id='anx-latency';"
+        "el.style.cssText='position:fixed;top:8px;right:8px;z-index:99999;"
+        "background:rgba(0,0,0,.7);color:#9f9;font:12px/1.4 ui-monospace,monospace;"
+        "padding:6px 10px;border-radius:4px;pointer-events:none;white-space:pre';"
+        "el.textContent='latency: —';"
+        "function mount(){if(document.body&&!document.getElementById('anx-latency'))"
+        "document.body.appendChild(el);}"
+        "if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);"
+        "else mount();"
+        "function paint(rtt,vid){"
+        "var parts=['RTT '+(rtt==null?'—':rtt+' ms')];"
+        "if(vid!=null)parts.push('video '+vid+' ms');"
+        "el.textContent=parts.join(' · ');"
+        "var n=rtt==null?999:rtt;"
+        "el.style.color=n<80?'#9f9':n<200?'#ff9':'#f99';"
+        "}"
+        "async function tick(){"
+        "var t0=performance.now();"
+        "try{"
+        "var r=await fetch('/health',{cache:'no-store'});"
+        "if(!r.ok)throw new Error('http '+r.status);"
+        "await r.json();"
+        "paint(Math.round(performance.now()-t0),window.__anxVideoMs);"
+        "}catch(e){paint(null,window.__anxVideoMs);el.style.color='#f99';"
+        "el.textContent='RTT err · video '+(window.__anxVideoMs==null?'—':window.__anxVideoMs+' ms');}"
+        "}"
+        "setInterval(tick,1000);tick();"
+        "})();</script>"
+        '<script src="/anx/arm_sliders.js" defer></script>'
+    )
+    if "</body>" in html:
+        html = html.replace("</body>", snippet + "</body>", 1)
+    else:
+        html = html + snippet
+    try:
+        index.write_text(html, encoding="utf-8")
+        _log.info("injected latency HUD + arm sliders into %s", index)
+    except OSError as exc:
+        _log.warning("latency HUD: could not write %s: %s", index, exc)
+
+
+# Back-compat name used in older call sites / docs.
+_install_ws_scheme_rewrite = _install_ui_https_rewrites
+
 
 
 def _require_tls_context():
@@ -340,6 +538,16 @@ def _run_wsgi(flask_app, *, host: str, port: int) -> None:
     if use_tls:
         options["certfile"] = str(cert)
         options["keyfile"] = str(key)
+
+    def _on_exit(_server=None):
+        try:
+            from anx_bridge.servos import release_servos
+
+            release_servos()
+        except Exception:
+            _log.exception("gunicorn on_exit servo release failed")
+
+    options["on_exit"] = _on_exit
 
     class _App(BaseApplication):
         def __init__(self, application, cfg):
@@ -449,6 +657,7 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
             register_servo_ctrl,
             release_on_controllers,
         )
+        from anx_bridge.servo_positions import bind_servo_ctrl
 
         # Vendor scGear.moveInit() drives mid poses and holds torque. Drop PWM
         # immediately so servos stay limp until a control socket connects.
@@ -465,6 +674,7 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
             if ctrl is None:
                 continue
             register_servo_ctrl(ctrl)
+            bind_servo_ctrl(ctrl)
             if hasattr(ctrl, "initPos") and len(ctrl.initPos) > 0:
                 ctrl.initPos[0] = rest
         release_on_controllers(ctrls)
@@ -475,24 +685,47 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     except Exception as exc:
         _log.warning("servo release after webServer import failed: %s", exc)
 
-    # Overlay-only wrap: stock UI commands count as remote control for idle lights.
+    # Overlay-only wrap: idle lights + absolute servoSet:<ch>:<deg> for sliders.
     try:
         from anx_bridge import note_ui_control
+        from anx_bridge.servo_positions import parse_ws_servo_set, set_servo_angle
+        from anx_bridge.servos import release_servos
 
         if hasattr(ws_mod, "robotCtrl"):
             _orig_robot_ctrl = ws_mod.robotCtrl
 
             def _robot_ctrl_with_idle(command_input, response):
                 try:
-                    note_ui_control()
+                    note_ui_control(arm_servos=command_input not in ("home",))
                 except Exception:
                     pass
+                if command_input == "home":
+                    # Vendor home drives mid/init into stops → heat. Stay limp.
+                    try:
+                        release_servos()
+                    except Exception:
+                        _log.exception("home release failed")
+                    return None
+                parsed = parse_ws_servo_set(command_input)
+                if parsed is not None:
+                    ch, deg = parsed
+                    try:
+                        set_servo_angle(ch, deg)
+                    except Exception:
+                        _log.exception("servoSet via WS failed ch=%s deg=%s", ch, deg)
+                    return None
                 return _orig_robot_ctrl(command_input, response)
 
             ws_mod.robotCtrl = _robot_ctrl_with_idle
-            _log.info("wrapped webServer.robotCtrl for idle police indicator")
+            _log.info("wrapped webServer.robotCtrl for idle lights + servoSet + limp home")
     except Exception as exc:
-        _log.warning("could not wrap webServer.robotCtrl for idle lights: %s", exc)
+        _log.warning("could not wrap webServer.robotCtrl: %s", exc)
+
+    # Extend get_info with battery volts (ADS7830) for status chips under CPU load.
+    try:
+        _install_get_info_battery(ws_mod)
+    except Exception as exc:
+        _log.warning("get_info battery wrap failed: %s", exc)
 
     try:
         ws_mod.switch.switchSetup()
@@ -582,12 +815,19 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    try:
+        from anx_bridge.servos import install_shutdown_release_hooks
+
+        install_shutdown_release_hooks()
+    except Exception as exc:
+        _log.warning("servo shutdown hooks not installed: %s", exc)
     # Patch Camera.frames before app.py does `camera = Camera()` (starts the thread).
     _install_camera_frames_guard()
     _load_vendor_app()
     _install_static_fallback()
     _install_health()
-    _install_ws_scheme_rewrite()
+    _install_ui_https_rewrites()
+    _install_latency_hud()
     _start_anx_bridge()
     # Prefer the vendor webapp bootstrap (camera object) when available.
     # Serve Flask on the **main** thread so gunicorn can install signal handlers

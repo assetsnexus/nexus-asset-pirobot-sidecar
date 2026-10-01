@@ -20,6 +20,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Drop PCA9685 PWM before kill so servos go limp (otherwise they keep holding heat).
+if docker compose ps --status running -q 2>/dev/null | grep -q .; then
+  echo "Releasing servos (PWM off) before stop..."
+  docker compose exec -T anx-robot python -c '
+import sys
+sys.path.insert(0, "/overlay")
+from anx_bridge.servos import release_servos
+release_servos()
+print("servos released")
+' 2>/dev/null || echo "warn: could not exec servo release (container may already be stopping)" >&2
+fi
+
 if [[ ${#args[@]} -gt 0 ]]; then
   docker compose down "${args[@]}"
 else

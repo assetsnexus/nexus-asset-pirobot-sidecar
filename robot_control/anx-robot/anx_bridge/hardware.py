@@ -292,6 +292,12 @@ class HardwareExecutor:
                 sc.initPos[ARM_CHANNEL] = arm_rest_deg()
             register_servo_ctrl(sc)
             release_servos(sc)
+            try:
+                from .servo_positions import bind_servo_ctrl
+
+                bind_servo_ctrl(sc)
+            except Exception:
+                logger.debug("bind_servo_ctrl skipped", exc_info=True)
             sc.start()
             self._sc = sc
         except Exception:
@@ -438,7 +444,7 @@ class HardwareExecutor:
             "down",
             "home",
         ):
-            ensure_servos_armed(self._sc, park_arm=True)
+            ensure_servos_armed(self._sc, park_arm=False)
         if action in (
             "turn_left_90",
             "turn_right_90",
@@ -556,10 +562,11 @@ class HardwareExecutor:
         elif action == "UDstop":
             sc.stopWiggle()
         elif action == "home":
-            ensure_servos_armed(sc, park_arm=True)
-            # moveServoInit expects a list of channel IDs.
-            sc.moveServoInit(list(range(5)))
-            park_arm_upright(sc, deg=arm_rest_deg())
+            # Do not drive vendor init angles — those hit mechanical stops and heat.
+            from .servos import release_servos
+
+            release_servos(sc)
+            logger.info("home → servos released (limp), not parked at init")
         elif switch is None and action.startswith("Switch_"):
             logger.info("robot action %s (no GPIO switches)", action)
         elif action == "Switch_1_on":

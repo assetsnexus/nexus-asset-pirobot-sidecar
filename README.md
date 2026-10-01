@@ -73,7 +73,7 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_CONTROL_SOURCE` | `auto` \| `usb` \| `mqtt` |
 | `ANX_TOPIC_PREFIX` | Default `rasptank` (blueprint topic prefix) |
 | `ANX_DEADMAN_MS` | Quiet-MQTT failsafe (default 500); gated during timed motion; suppressed while node heartbeats are fresh |
-| `ANX_ARM_REST_DEG` | Shoulder (ch0) upright park when control connects / first servo command (default `0`). Servos stay PWM-off (limp) from boot until then. Stock `90` is mid/forward (stall); `180` drives past the down stop on this horn. |
+| `ANX_ARM_REST_DEG` | Explicit park angle only (default `45`, safe band ~20–85). Servos stay PWM-off from boot; **connect does not park**. Stock `90` stalls forward; `0`/`180` fight endstops when held. |
 | `ANX_IDLE_POLICE` | `true` (default): status LEDs — **red blink** when the UI control socket has no clients, **blue blink** when connected. Explicit light commands override until idle; disconnected+idle always returns to red. |
 | `ANX_IDLE_POLICE_MS` | Quiet time before restoring auto status color (default 3000). |
 | `ANX_NODE_HEARTBEAT_MS` | Node-heartbeat freshness window (default 2000); node owns session timers while fresh |

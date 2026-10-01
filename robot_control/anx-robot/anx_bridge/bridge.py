@@ -45,9 +45,13 @@ def poke_node_heartbeat() -> None:
         _deadman.poke_node_heartbeat()
 
 
-def note_ui_control() -> None:
-    """Stock Adeept UI drove a command — arm servos + clear idle lights."""
-    ensure_servos_armed(park_arm=True)
+def note_ui_control(*, arm_servos: bool = True) -> None:
+    """Stock Adeept UI drove a command — optionally enable PWM + clear idle lights.
+
+    Never auto-parks the shoulder: holding an endstop pose overheats the servo.
+    """
+    if arm_servos:
+        ensure_servos_armed(park_arm=False)
     if _status_lights is not None:
         _status_lights.note_control()
 
@@ -55,15 +59,13 @@ def note_ui_control() -> None:
 def set_control_socket_clients(count: int) -> None:
     """UI control WebSocket client count.
 
-    Connected → arm servos (park shoulder upright) + blue status.
+    Connected → blue status only (servos stay limp until a real command).
     Disconnected → release PWM (limp) + red status.
     """
     connected = int(count) > 0
     if _status_lights is not None:
         _status_lights.set_ws_connected(connected)
-    if connected:
-        ensure_servos_armed(park_arm=True)
-    else:
+    if not connected:
         release_servos()
 
 

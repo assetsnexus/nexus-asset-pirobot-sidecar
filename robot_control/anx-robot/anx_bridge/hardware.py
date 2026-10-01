@@ -540,36 +540,27 @@ class HardwareExecutor:
             "home",
         ):
             logger.info("robot action %s (no servos)", action)
-        elif action == "armUp":
-            sc.singleServo(0, 1, 2)
-        elif action == "armDown":
-            sc.singleServo(0, -1, 2)
-        elif action == "armStop":
-            sc.stopWiggle()
-        elif action == "handUp":
-            sc.singleServo(1, -1, 2)
-        elif action == "handDown":
-            sc.singleServo(1, 1, 2)
-        elif action == "handStop":
-            sc.stopWiggle()
-        elif action == "lookleft":
-            sc.singleServo(2, 1, 2)
-        elif action == "lookright":
-            sc.singleServo(2, -1, 2)
-        elif action == "LRstop":
-            sc.stopWiggle()
-        elif action == "grab":
-            sc.singleServo(3, 1, 2)
-        elif action == "loose":
-            sc.singleServo(3, -1, 2)
-        elif action == "GLstop":
-            sc.stopWiggle()
-        elif action == "up":
-            sc.singleServo(4, -1, 1)
-        elif action == "down":
-            sc.singleServo(4, 1, 1)
-        elif action == "UDstop":
-            sc.stopWiggle()
+        elif action in (
+            "armUp",
+            "armDown",
+            "handUp",
+            "handDown",
+            "lookleft",
+            "lookright",
+            "grab",
+            "loose",
+            "up",
+            "down",
+        ):
+            # Rate-limited goal at the UI endstop (smooth direction reverse).
+            from .servo_positions import hold_servo_action
+
+            if not hold_servo_action(action):
+                logger.debug("hold_servo_action miss for %s", action)
+        elif action in ("armStop", "handStop", "LRstop", "GLstop", "UDstop"):
+            from .servo_positions import freeze_servo_action
+
+            freeze_servo_action(action)
         elif action == "home":
             # Do not drive vendor init angles — those hit mechanical stops and heat.
             from .servos import release_servos

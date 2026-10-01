@@ -692,3 +692,71 @@ def test_battery_soc_from_voltage(monkeypatch):
     low = estimate_from_volts(6.2)
     assert low.percent < 15
     assert low.level == "crit"
+
+
+def test_servo_slew_step_toward_rate_and_reverse():
+    from anx_bridge.servo_slew import ServoSlewController, step_toward
+
+    # Cap rate: 90°/s × 0.1s → at most 9° per step when amax=0.
+    pos, vel = step_toward(0.0, 90.0, dt=0.1, vmax=90.0, vel=0.0, amax=0.0)
+    assert abs(pos - 9.0) < 1e-6
+    assert vel == 90.0
+
+    # Accel limits flip: from +vmax toward opposite goal, velocity ramps down.
+    pos2, vel2 = step_toward(50.0, 0.0, dt=0.1, vmax=90.0, vel=90.0, amax=360.0)
+    assert vel2 < 90.0  # decelerating
+    assert pos2 < 50.0 + 9.1  # did not jump
+
+    ctrl = ServoSlewController()
+    applied = []
+    ctrl.set_apply(lambda ch, pwm: applied.append((ch, round(pwm, 2))))
+    ctrl.sync_pos(0, 0.0)
+    ctrl.set_goal(0, 90.0)
+    for _ in range(5):
+        ctrl.tick(dt=0.05)
+    assert applied, "slew should apply intermediate PWM"
+    assert applied[-1][1] < 90.0  # not instantly at goal
+    # Reverse goal mid-flight — position stays continuous.
+    mid = ctrl.position(0)
+    ctrl.set_goal(0, 0.0)
+    ctrl.tick(dt=0.05)
+    assert abs(ctrl.position(0) - mid) < 20.0
+
+
+def test_shoulder_invert_and_slew_goal(monkeypatch):
+    from anx_bridge import servo_positions as sp
+    from anx_bridge.servo_limits import servo_limit
+
+    monkeypatch.setenv("ANX_SERVO_SLEW", "true")
+
+    class _Fake:
+        def __init__(self):
+            self.nowPos = [0, 90, 90, 90, 90]
+            self.initPos = list(self.nowPos)
+            self.writes = []
+
+        def setPWM(self, channel, deg):
+            self.nowPos[channel] = int(deg)
+            self.writes.append((channel, int(deg)))
+
+    # Reset module state between tests.
+    sp._ctrl = None
+    sp._goals_ui.clear()
+    sp._actual_ui.clear()
+    sp._apply_wired = False
+
+    fake = _Fake()
+    sp.bind_servo_ctrl(fake)
+    lim = servo_limit(0)
+    assert lim.invert
+    # UI 85 (upright) → PWM 0
+    assert lim.ui_to_pwm(85) == 0
+    goal = sp.set_servo_angle(0, 0)  # UI low = forward = PWM 85
+    assert goal == 0
+    # Goal recorded; PWM arrives via slewer ticks.
+    from anx_bridge.servo_slew import get_slew
+
+    get_slew().tick(dt=0.2)
+    assert fake.writes, "expected slew PWM write"
+    assert fake.writes[-1][0] == 0
+    assert fake.writes[-1][1] > 0  # moving toward PWM 85

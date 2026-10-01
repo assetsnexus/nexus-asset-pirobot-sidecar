@@ -96,6 +96,12 @@ def _release_one(ctrl: Any, *, channels: int) -> int:
 def release_servos(servo_ctrl: Any = None, *, channels: int = SERVO_CHANNELS) -> None:
     """Drop PWM on servo channels so motors go limp (no holding torque)."""
     global _armed
+    try:
+        from .servo_positions import freeze_all_servos
+
+        freeze_all_servos()
+    except Exception:
+        logger.debug("freeze_all_servos before release failed", exc_info=True)
     with _release_lock:
         targets: List[Any]
         if servo_ctrl is not None:

@@ -47,6 +47,8 @@ curl -sk https://127.0.0.1:5000/health
 
 Web UI: `https://<pi>:5000` (self-signed cert from `./up.sh` → `data/certs/`). Control uses `wss://<pi>:8888`. Stock Adeept WS login is `admin` / `123456`. Set `ANX_ROBOT_TLS=false` to fall back to plain HTTP/WS.
 
+Until the browser trusts the cert (click through the warning once, or import `data/certs/robot.crt`), clients abort the handshake with `CERTIFICATE_UNKNOWN` — gunicorn rate-limits that noise. Always use `curl -sk` for probes.
+
 ## How the MQTT bridge starts
 
 1. Process entry is `robot_control/anx-robot/anx_web_entry.py` (Docker `CMD` / systemd `ExecStart`).
@@ -74,6 +76,8 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_TOPIC_PREFIX` | Default `rasptank` (blueprint topic prefix) |
 | `ANX_DEADMAN_MS` | Quiet-MQTT failsafe (default 500); gated during timed motion; suppressed while node heartbeats are fresh |
 | `ANX_ARM_REST_DEG` | Shoulder init angle (default `0` = 90° opposite stock mid). Stock `90` stalls forward; `180` past the down stop. Vendor `moveInit` is patched to use this, then PWM is released (no hold). |
+| `ANX_SERVO_SLEW` | `true` (default): rate-limit servo goals (sliders + hold buttons). `false` = snap. |
+| `ANX_SERVO_MAX_DEG_S` / `ANX_SERVO_MAX_DEG_S2` | Max angular rate / accel (default `90` °/s, `360` °/s²). Accel `0` = instant velocity toward goal. |
 | `ANX_BATT_V_EMPTY` / `ANX_BATT_V_FULL` | Pack voltage span for SoC % (default `6.0` / `8.4`, 2S). Hard Ware chip + 7s sparkline. |
 | `ANX_BATT_WARN_PCT` / `ANX_BATT_CRIT_PCT` | Sparkline color thresholds (default `30` / `15`). |
 | `ANX_IDLE_POLICE` | `true` (default): status LEDs — **red blink** when the UI control socket has no clients, **blue blink** when connected. Explicit light commands override until idle; disconnected+idle always returns to red. |

@@ -496,6 +496,57 @@ def _require_tls_context():
     return ctx
 
 
+def _install_gunicorn_ssl_noise_filter() -> None:
+    """Rate-limit gunicorn's CERTIFICATE_UNKNOWN spam from self-signed TLS.
+
+    Browsers (and any client that has not yet trusted ``data/certs/robot.crt``)
+    abort the handshake with ``sslv3 alert certificate unknown``. That is
+    expected until the user accepts the warning once; without filtering,
+    each probe floods the log.
+    """
+    import logging
+    import time
+
+    class _CertUnknownFilter(logging.Filter):
+        def __init__(self) -> None:
+            super().__init__()
+            self._window_start = 0.0
+            self._suppressed = 0
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            try:
+                msg = record.getMessage()
+            except Exception:
+                return True
+            low = msg.lower()
+            if "certificate_unknown" not in low and "certificate unknown" not in low:
+                return True
+            now = time.monotonic()
+            if self._window_start and now - self._window_start < 60.0:
+                self._suppressed += 1
+                return False
+            suppressed = self._suppressed
+            self._window_start = now
+            self._suppressed = 0
+            record.msg = (
+                "Client rejected self-signed TLS cert (CERTIFICATE_UNKNOWN) — "
+                "expected until the browser trusts data/certs/robot.crt"
+                + (f" (suppressed {suppressed} similar in last 60s)" if suppressed else "")
+            )
+            record.args = ()
+            return True
+
+    filt = _CertUnknownFilter()
+    for name in ("gunicorn.error", "gunicorn", "ssl"):
+        logging.getLogger(name).addFilter(filt)
+    # Also attach to root so early gunicorn records are covered.
+    logging.getLogger().addFilter(filt)
+    _log.info(
+        "gunicorn TLS: self-signed CERTIFICATE_UNKNOWN client alerts are rate-limited "
+        "(accept the browser warning once, or curl -sk)"
+    )
+
+
 def _run_wsgi(flask_app, *, host: str, port: int) -> None:
     """Serve Flask with enough concurrency for HTTPS UI + long-lived /video_feed.
 
@@ -541,6 +592,9 @@ def _run_wsgi(flask_app, *, host: str, port: int) -> None:
         )
         _werkzeug()
         return
+
+    if use_tls:
+        _install_gunicorn_ssl_noise_filter()
 
     options = {
         "bind": f"{host}:{port}",
@@ -720,10 +774,15 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     except Exception as exc:
         _log.debug("status lights re-assert after webServer import failed: %s", exc)
 
-    # Overlay-only wrap: idle lights + absolute servoSet:<ch>:<deg> for sliders.
+    # Overlay-only wrap: idle lights + slew hold/stop + absolute servoSet + limp home.
     try:
         from anx_bridge import note_ui_control
-        from anx_bridge.servo_positions import parse_ws_servo_set, set_servo_angle
+        from anx_bridge.servo_positions import (
+            freeze_servo_action,
+            hold_servo_action,
+            parse_ws_servo_set,
+            set_servo_angle,
+        )
         from anx_bridge.servos import release_servos
 
         if hasattr(ws_mod, "robotCtrl"):
@@ -749,10 +808,19 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
                     except Exception:
                         _log.exception("servoSet via WS failed ch=%s deg=%s", ch, deg)
                     return None
+                try:
+                    if hold_servo_action(command_input):
+                        return None
+                    if freeze_servo_action(command_input):
+                        return None
+                except Exception:
+                    _log.exception("servo hold/freeze via WS failed cmd=%s", command_input)
                 return _orig_robot_ctrl(command_input, response)
 
             ws_mod.robotCtrl = _robot_ctrl_with_idle
-            _log.info("wrapped webServer.robotCtrl for idle lights + servoSet + limp home")
+            _log.info(
+                "wrapped webServer.robotCtrl for idle lights + slew hold/stop + servoSet + limp home"
+            )
     except Exception as exc:
         _log.warning("could not wrap webServer.robotCtrl: %s", exc)
 

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from anx_tls import ssl_server_context, tls_enabled
+from anx_tls import ssl_server_context, tls_enabled, tls_paths
 
 _OVERLAY_DIR = Path(__file__).resolve().parent
 _WEB_DIR = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "")).resolve() if os.environ.get("ANX_ROBOT_WEB_DIR") else (
@@ -278,26 +278,83 @@ def _require_tls_context():
     return ctx
 
 
-def _flask_ssl_args() -> dict:
-    ctx = _require_tls_context() if tls_enabled() else None
-    return {"ssl_context": ctx} if ctx is not None else {}
+def _run_wsgi(flask_app, *, host: str, port: int) -> None:
+    """Serve Flask with enough concurrency for HTTPS UI + long-lived /video_feed.
+
+    Werkzeug's ``app.run(ssl_context=...)`` serialises TLS handshakes on the accept
+    thread. The browser then opens /video_feed (never ends) plus static assets and
+    every further request (and curl) stalls. gunicorn gthread accepts and handshakes
+    without that head-of-line block.
+    """
+    cert, key = tls_paths() if tls_enabled() else (None, None)
+    use_tls = cert is not None and key is not None
+    threads = int(os.environ.get("ANX_ROBOT_HTTP_THREADS", "16"))
+    try:
+        from gunicorn.app.base import BaseApplication
+    except Exception as exc:
+        _log.warning(
+            "gunicorn unavailable (%s); falling back to werkzeug (may stall under browser load)",
+            exc,
+        )
+        ssl_args = {"ssl_context": ssl_server_context()} if use_tls else {}
+        flask_app.run(host=host, port=port, threaded=True, **ssl_args)
+        return
+
+    options = {
+        "bind": f"{host}:{port}",
+        "workers": 1,
+        "threads": max(4, threads),
+        "worker_class": "gthread",
+        # /video_feed is an infinite MJPEG stream — do not kill the worker.
+        "timeout": 0,
+        "graceful_timeout": 30,
+        "keepalive": 5,
+        "accesslog": None,
+        "errorlog": "-",
+        "loglevel": "info",
+    }
+    if use_tls:
+        options["certfile"] = str(cert)
+        options["keyfile"] = str(key)
+
+    class _App(BaseApplication):
+        def __init__(self, application, cfg):
+            self.application = application
+            self.cfg_dict = cfg
+            super().__init__()
+
+        def load_config(self):
+            for key, value in self.cfg_dict.items():
+                self.cfg.set(key, value)
+
+        def load(self):
+            return self.application
+
+    scheme = "https" if use_tls else "http"
+    _log.info(
+        "UI server %s://%s:%s (gunicorn gthread workers=1 threads=%s)",
+        scheme,
+        host,
+        port,
+        options["threads"],
+    )
+    _App(flask_app, options).run()
 
 
 def _patch_webapp_for_tls(web) -> None:
-    """Vendor webapp.thread() calls app.run without TLS — inject ssl_context when enabled."""
-    ctx = _require_tls_context() if tls_enabled() else None
-    if ctx is None:
-        return
+    """Vendor webapp.thread() calls app.run — replace with concurrent HTTPS WSGI."""
+    if tls_enabled():
+        _require_tls_context()
     flask_app = getattr(_vendor, "app", None)
     if flask_app is None:
         return
     http_port = int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
 
     def thread(_self=None):
-        flask_app.run(host="0.0.0.0", port=http_port, threaded=True, ssl_context=ctx)
+        _run_wsgi(flask_app, host="0.0.0.0", port=http_port)
 
     web.thread = thread
-    _log.info("Flask UI TLS enabled on https://0.0.0.0:%s (self-signed)", http_port)
+    _log.info("Flask UI will serve on 0.0.0.0:%s via gunicorn", http_port)
 
 
 def _start_adeept_control_websocket(flask_webapp) -> None:
@@ -514,7 +571,9 @@ def main() -> None:
         return
     port = int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
     _start_adeept_control_websocket(app)
-    app.run(host="0.0.0.0", port=port, threaded=True, **_flask_ssl_args())
+    if tls_enabled():
+        _require_tls_context()
+    _run_wsgi(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":

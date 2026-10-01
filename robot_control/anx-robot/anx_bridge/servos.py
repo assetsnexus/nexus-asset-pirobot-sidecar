@@ -70,13 +70,9 @@ def park_arm_upright(servo_ctrl: Any, deg: int | None = None) -> None:
 
 
 def park_arm_on_controllers(controllers: Iterable[Any], deg: int | None = None) -> None:
-    """Apply upright rest to every live ServoCtrl (PCA9685 is shared at 0x5f)."""
-    seen: set[int] = set()
+    """Park shoulder once (PCA9685 is shared — repeating per ServoCtrl only stalls boot)."""
     for ctrl in controllers:
         if ctrl is None:
             continue
-        ident = id(ctrl)
-        if ident in seen:
-            continue
-        seen.add(ident)
         park_arm_upright(ctrl, deg=deg)
+        return

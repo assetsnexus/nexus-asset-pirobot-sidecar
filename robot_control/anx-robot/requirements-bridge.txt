@@ -20,3 +20,5 @@ lgpio
 # Vendor robotLight.RobotWS2812 (Pi ≤4 PWM path). HAT V3.1 prefers SPI (spidev).
 rpi_ws281x>=5.0
 spidev>=3.5
+# Concurrent HTTPS UI + infinite /video_feed — Werkzeug SSL accept stalls under browser load.
+gunicorn>=22.0

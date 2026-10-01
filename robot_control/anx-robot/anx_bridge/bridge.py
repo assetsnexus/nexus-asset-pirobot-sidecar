@@ -18,7 +18,7 @@ from .controller_input import (
 )
 from .deadman import Deadman
 from .hardware import HardwareExecutor
-from .idle_police import IdlePoliceIndicator
+from .idle_police import StatusLightsController
 from .mqtt_bridge import MqttBridge
 from .mqtt_client import PahoSession
 from .telemetry import build_telemetry
@@ -29,7 +29,11 @@ _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 _session: Optional[PahoSession] = None
 _deadman: Optional[Deadman] = None
-_idle_police: Optional[IdlePoliceIndicator] = None
+_status_lights: Optional[StatusLightsController] = None
+_executor_ref: Optional[HardwareExecutor] = None
+
+# Compat alias for older call sites.
+_idle_police = None
 
 SampleFn = Callable[[str, int], dict]
 
@@ -42,8 +46,32 @@ def poke_node_heartbeat() -> None:
 
 def note_ui_control() -> None:
     """Stock Adeept UI drove a command — clears idle police the same as MQTT/USB."""
-    if _idle_police is not None:
-        _idle_police.note_control()
+    if _status_lights is not None:
+        _status_lights.note_control()
+
+
+def set_control_socket_clients(count: int) -> None:
+    """UI control WebSocket client count (0 = disconnected → red blink)."""
+    if _status_lights is not None:
+        _status_lights.set_ws_connected(int(count) > 0)
+
+
+def release_line_sensors_for_vendor() -> None:
+    """Drop overlay IR line claims so vendor ``functions.setup()`` can open GPIO17/27/22."""
+    if _executor_ref is not None:
+        try:
+            _executor_ref.sensors.release_line()
+            logger.info("released overlay line IR GPIOs for vendor webServer import")
+        except Exception as exc:
+            logger.warning("could not release line sensors: %s", exc)
+
+
+def adopt_vendor_line_sensors() -> None:
+    if _executor_ref is not None:
+        try:
+            _executor_ref.sensors.adopt_vendor_line_sensors()
+        except Exception as exc:
+            logger.debug("adopt vendor line sensors: %s", exc)
 
 
 def start_bridge(
@@ -51,7 +79,7 @@ def start_bridge(
     executor: Optional[Callable] = None,
     sample: Optional[SampleFn] = None,
 ) -> None:
-    global _thread, _session, _deadman, _idle_police
+    global _thread, _session, _deadman, _status_lights, _idle_police, _executor_ref
     cfg = config or BridgeConfig.from_env()
     if not cfg.enabled:
         logger.info("ANX bridge disabled (ANX_BRIDGE_ENABLED)")
@@ -63,6 +91,7 @@ def start_bridge(
     if isinstance(executor, HardwareExecutor):
         # Apply overlay motion defaults from bridge config when executor used defaults.
         executor._motion_cfg = cfg.motion  # noqa: SLF001 — wire config before first motion
+        _executor_ref = executor
         if sample is None:
             from .hardware import build_sample_fn
 
@@ -76,19 +105,23 @@ def start_bridge(
     )
     _deadman = deadman
 
-    idle_police = None
+    status_lights = None
     if isinstance(executor, HardwareExecutor) and cfg.idle_police_enabled:
-        idle_police = IdlePoliceIndicator(
+        status_lights = StatusLightsController(
             executor,
             idle_ms=cfg.idle_police_ms,
             enabled=True,
         )
-        _idle_police = idle_police
+        _status_lights = status_lights
+        _idle_police = status_lights
+        # Start disconnected → red until a UI control socket connects.
+        status_lights.set_ws_connected(False)
         logger.info(
-            "idle police lights enabled (quiet >= %sms → WS2812 police blink)",
+            "status lights enabled (red=disconnected, blue=connected; idle >= %sms)",
             cfg.idle_police_ms,
         )
     else:
+        _status_lights = None
         _idle_police = None
 
     published_holder: dict = {}
@@ -100,7 +133,7 @@ def start_bridge(
 
     if isinstance(executor, HardwareExecutor):
         executor.attach_runtime(
-            deadman=deadman, publish_fast=publish_fast, idle_police=idle_police
+            deadman=deadman, publish_fast=publish_fast, idle_police=status_lights
         )
 
     try:
@@ -167,8 +200,8 @@ def start_bridge(
         last_full = 0.0
         while not _stop.wait(0.05):
             deadman.tick()
-            if idle_police is not None:
-                idle_police.tick()
+            if status_lights is not None:
+                status_lights.tick()
             now = time.monotonic()
             # Fast range publish (~20 Hz) so asset-node guards can see mm promptly.
             if isinstance(executor, HardwareExecutor):
@@ -193,7 +226,9 @@ def start_bridge(
 
 
 def stop_bridge() -> None:
-    global _deadman, _idle_police
+    global _deadman, _status_lights, _idle_police, _executor_ref
     _stop.set()
     _deadman = None
+    _status_lights = None
     _idle_police = None
+    _executor_ref = None

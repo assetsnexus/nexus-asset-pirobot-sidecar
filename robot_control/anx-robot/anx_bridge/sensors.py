@@ -140,6 +140,7 @@ class SensorSuite:
         self._line_middle = None
         self._line_right = None
         self._init_attempted = False
+        self._line_released_for_vendor = False
 
     def setup(self) -> None:
         if self._init_attempted:
@@ -150,7 +151,7 @@ class SensorSuite:
             self._setup_ultrasonic()
         if self._battery_fn is None:
             self._setup_battery()
-        if self._line_fn is None:
+        if self._line_fn is None and not self._line_released_for_vendor:
             self._setup_line()
 
     def _setup_ultrasonic(self) -> None:
@@ -185,6 +186,38 @@ class SensorSuite:
             self._line_right = InputDevice(pin=LINE_RIGHT_GPIO)
         except Exception as exc:
             logger.debug("line sensors unavailable: %s", exc)
+
+    def release_line(self) -> None:
+        """Free IR line GPIOs so vendor ``functions.setup()`` can claim them."""
+        for attr in ("_line_left", "_line_middle", "_line_right"):
+            dev = getattr(self, attr, None)
+            if dev is None:
+                continue
+            try:
+                dev.close()
+            except Exception as exc:
+                logger.debug("line sensor close %s: %s", attr, exc)
+            setattr(self, attr, None)
+        self._line_released_for_vendor = True
+
+    def adopt_vendor_line_sensors(self) -> bool:
+        """Reuse ``functions`` module globals after webServer imported successfully."""
+        try:
+            import functions as fuc_mod
+        except Exception:
+            return False
+        left = getattr(fuc_mod, "track_line_left", None)
+        mid = getattr(fuc_mod, "track_line_middle", None)
+        right = getattr(fuc_mod, "track_line_right", None)
+        if left is None or mid is None or right is None:
+            return False
+        self._line_left = left
+        self._line_middle = mid
+        self._line_right = right
+        self._line_released_for_vendor = False
+        self._init_attempted = True
+        logger.info("line sensors adopted from vendor functions module")
+        return True
 
     def ultrasonic_mm(self) -> Optional[float]:
         if self._ultrasonic_mm_fn is not None:

@@ -335,6 +335,12 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     # Camera()/Flask are not constructed a second time.
     sys.modules.setdefault("app", _vendor)
     try:
+        from anx_bridge import release_line_sensors_for_vendor
+
+        release_line_sensors_for_vendor()
+    except Exception as exc:
+        _log.warning("line GPIO release before webServer import failed: %s", exc)
+    try:
         import webServer as ws_mod
     except Exception as exc:
         _control_ws_state["error"] = f"webServer import failed: {exc}"
@@ -343,6 +349,13 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
             traceback.format_exc(),
         )
         return
+
+    try:
+        from anx_bridge import adopt_vendor_line_sensors
+
+        adopt_vendor_line_sensors()
+    except Exception:
+        pass
 
     ws_mod.flask_app = flask_webapp
     try:
@@ -398,16 +411,33 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
 
     ssl_ctx = ssl_server_context()
     _control_ws_state["scheme"] = "wss" if ssl_ctx is not None else "ws"
+    _control_ws_state["clients"] = 0
 
     def _run() -> None:
         import asyncio
 
         import websockets
 
+        clients = {"n": 0}
+
+        def _set_clients(n: int) -> None:
+            clients["n"] = n
+            _control_ws_state["clients"] = n
+            try:
+                from anx_bridge import set_control_socket_clients
+
+                set_control_socket_clients(n)
+            except Exception as exc:
+                _log.debug("status lights ws client update failed: %s", exc)
+
         async def handler(websocket):
-            # websockets>=10 dropped the path argument; vendor main_logic still has it.
-            await ws_mod.check_permit(websocket)
-            await ws_mod.recv_msg(websocket)
+            _set_clients(clients["n"] + 1)
+            try:
+                # websockets>=10 dropped the path argument; vendor main_logic still has it.
+                await ws_mod.check_permit(websocket)
+                await ws_mod.recv_msg(websocket)
+            finally:
+                _set_clients(max(0, clients["n"] - 1))
 
         async def runner() -> None:
             serve_kwargs = {"ssl": ssl_ctx} if ssl_ctx is not None else {}

@@ -73,8 +73,8 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_TOPIC_PREFIX` | Default `rasptank` (blueprint topic prefix) |
 | `ANX_DEADMAN_MS` | Quiet-MQTT failsafe (default 500); gated during timed motion; suppressed while node heartbeats are fresh |
 | `ANX_ARM_REST_DEG` | Shoulder (ch0) upright park on start (default `180`). Stock `90` is mid/forward and stalls the servo. Try `0` if the arm moves the wrong way. |
-| `ANX_IDLE_POLICE` | `true` (default): blink WS2812 police lights while idle (no remote/UI control). The Robot HAT has no sleep/power-save mode in vendor firmware — battery ADC only. |
-| `ANX_IDLE_POLICE_MS` | Quiet time before idle police (default 3000). Explicit `police` / `police_off` override until the next auto cycle. |
+| `ANX_IDLE_POLICE` | `true` (default): status LEDs — **red blink** when the UI control socket has no clients, **blue blink** when connected. Explicit light commands override until idle; disconnected+idle always returns to red. |
+| `ANX_IDLE_POLICE_MS` | Quiet time before restoring auto status color (default 3000). |
 | `ANX_NODE_HEARTBEAT_MS` | Node-heartbeat freshness window (default 2000); node owns session timers while fresh |
 | `ANX_OBSTACLE_STOP_MM` | Local ultrasonic stop threshold during timed motion (default 100) |
 | `ANX_WHEEL_DIAMETER_M` / `ANX_TRACK_WIDTH_M` / `ANX_SPEED_AT_FULL_PWM_MPS` | Open-loop odometry defaults `0.045` / `0.12` / `0.35` |

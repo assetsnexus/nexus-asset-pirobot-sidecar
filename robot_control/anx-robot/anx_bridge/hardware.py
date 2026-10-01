@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Optional
 
@@ -35,6 +36,84 @@ logger = logging.getLogger(__name__)
 
 # Vendor switch.py drives these BCM lines (LED ports 1–3).
 _LED_GPIO = {1: 9, 2: 25, 3: 11}
+
+
+class _StatusBlinker(threading.Thread):
+    """Overlay-owned red/blue blink; pauses vendor lightMode so patterns do not fight."""
+
+    def __init__(self) -> None:
+        super().__init__(name="anx-status-blink", daemon=True)
+        self._lock = threading.Lock()
+        self._color: Optional[str] = None  # "red" | "blue" | None
+        self._strip = None
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+
+    def attach_strip(self, strip: Any) -> None:
+        with self._lock:
+            self._strip = strip
+
+    def set_color(self, color: Optional[str]) -> None:
+        with self._lock:
+            self._color = color
+        self._wake.set()
+        if not self.is_alive():
+            try:
+                self.start()
+            except RuntimeError:
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def _paint(self, r: int, g: int, b: int) -> None:
+        strip = self._strip
+        if strip is None:
+            return
+        try:
+            if hasattr(strip, "set_all_led_color_data"):
+                strip.set_all_led_color_data(r, g, b)
+            elif hasattr(strip, "set_all_led_color"):
+                strip.set_all_led_color(r, g, b)
+            elif hasattr(strip, "setColor"):
+                strip.setColor(r, g, b)
+        except Exception as exc:
+            logger.debug("status blink paint failed: %s", exc)
+
+    def _pause_vendor(self) -> None:
+        strip = self._strip
+        if strip is None:
+            return
+        try:
+            if hasattr(strip, "lightMode"):
+                strip.lightMode = "none"
+            if hasattr(strip, "pause") and hasattr(strip, "__flag"):
+                # Don't call pause() — it zeros LEDs and clears the vendor flag;
+                # we only need to stop police/breath loops.
+                pass
+        except Exception:
+            pass
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                color = self._color
+            if color not in ("red", "blue"):
+                self._wake.wait(0.5)
+                self._wake.clear()
+                continue
+            self._pause_vendor()
+            on = (255, 0, 0) if color == "red" else (0, 0, 255)
+            self._paint(*on)
+            if self._stop.wait(0.35):
+                break
+            with self._lock:
+                if self._color != color:
+                    continue
+            self._paint(0, 0, 0)
+            if self._stop.wait(0.35):
+                break
 
 
 def _claim_output_quiet(lgpio: Any, handle: int, gpio: int, level: int) -> None:
@@ -143,6 +222,7 @@ class HardwareExecutor:
         self._sc = None  # RPIservo.ServoCtrl
         self._ws2812 = None
         self._ws2812_ready = False
+        self._status_blinker = _StatusBlinker()
         self._init_error: Optional[str] = None
         self._motion_cfg = motion_config or OverlayMotionConfig()
         self.sensors = sensors or SensorSuite()
@@ -234,8 +314,9 @@ class HardwareExecutor:
             if ws is not None:
                 self._ws2812 = ws
                 self._ws2812_ready = True
-                if hasattr(ws, "breath"):
-                    ws.breath(70, 70, 255)
+                self._status_blinker.attach_strip(ws)
+                # Default: red blink until a control socket connects.
+                self._status_blinker.set_color("red")
         except Exception as exc:
             logger.warning("WS2812 unavailable: %s", exc)
             self._ws2812_ready = False
@@ -519,6 +600,7 @@ class HardwareExecutor:
             return
 
     def _police_on(self) -> None:
+        self._status_blinker.set_color(None)
         if not self._ws2812_ready:
             self._setup_lights()
         if self._ws2812 is not None and hasattr(self._ws2812, "police"):
@@ -530,6 +612,7 @@ class HardwareExecutor:
         logger.info("robot action police (no WS2812)")
 
     def _police_off(self) -> None:
+        self._status_blinker.set_color(None)
         if self._ws2812 is not None:
             try:
                 if hasattr(self._ws2812, "breath"):
@@ -541,12 +624,23 @@ class HardwareExecutor:
                 logger.debug("police_off failed: %s", exc)
         logger.info("robot action police_off (no WS2812)")
 
+    def set_status_blink(self, color: Optional[str]) -> None:
+        """Overlay status indicator: ``red`` / ``blue`` blink, or ``None`` to stop."""
+        if not self._ws2812_ready:
+            self._setup_lights()
+        if self._ws2812 is not None:
+            self._status_blinker.attach_strip(self._ws2812)
+            # Stop vendor police/breath loops before overlay blink.
+            try:
+                if hasattr(self._ws2812, "lightMode"):
+                    self._ws2812.lightMode = "none"
+            except Exception:
+                pass
+        self._status_blinker.set_color(color)
+
     def set_idle_police(self, active: bool) -> None:
-        """Overlay idle indicator — same LED modes as police / police_off."""
-        if active:
-            self._police_on()
-        else:
-            self._police_off()
+        """Deprecated: map old idle-police API to red blink / off."""
+        self.set_status_blink("red" if active else None)
 
     def _sample_hardware_servos(self) -> None:
         """When the HAT is live, range slots track nowPos instead of dry-run nudges."""

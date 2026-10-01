@@ -220,10 +220,15 @@ def _install_health() -> None:
 
 
 def _install_servo_api(flask_app) -> None:
-    """Absolute servo angles for Arm Control sliders (GET/POST /anx/servos)."""
+    """Absolute servo angles + power estimate APIs for the stock UI overlays."""
+    from anx_bridge.power_sense import power_payload, start_power_sampler
     from anx_bridge.servo_positions import describe_servos, set_many, set_servo_angle
 
     static_dir = _OVERLAY_DIR / "static"
+    try:
+        start_power_sampler()
+    except Exception as exc:
+        _log.warning("power sampler not started: %s", exc)
 
     @flask_app.route("/anx/servos", methods=["GET"])
     def anx_servos_get():
@@ -252,33 +257,44 @@ def _install_servo_api(flask_app) -> None:
             _log.exception("anx/servos set failed")
             return jsonify({"ok": False, "error": str(exc)}), 500
 
-    @flask_app.route("/anx/arm_sliders.js")
-    def anx_arm_sliders_js():
-        path = static_dir / "arm_sliders.js"
+    @flask_app.route("/anx/power", methods=["GET"])
+    def anx_power_get():
+        return jsonify(power_payload()), 200
+
+    def _js(name: str):
+        path = static_dir / name
         if not path.is_file():
-            return "/* arm_sliders.js missing */", 404, {"Content-Type": "application/javascript"}
+            return f"/* {name} missing */", 404, {"Content-Type": "application/javascript"}
         return path.read_text(encoding="utf-8"), 200, {
             "Content-Type": "application/javascript; charset=utf-8",
             "Cache-Control": "no-store",
         }
 
-    _log.info("servo position API mounted at /anx/servos (+ /anx/arm_sliders.js)")
+    @flask_app.route("/anx/arm_sliders.js")
+    def anx_arm_sliders_js():
+        return _js("arm_sliders.js")
+
+    @flask_app.route("/anx/power_badge.js")
+    def anx_power_badge_js():
+        return _js("power_badge.js")
+
+    _log.info("servo + power APIs mounted (/anx/servos, /anx/power, static overlays)")
 
 
 def _install_get_info_battery(ws_mod) -> None:
-    """Append ADS7830 battery volts to get_info (chip under CPU Usage).
+    """Inject estimated load watts into get_info (Hard Ware chip under CPU Usage).
 
-    Robot HAT has no current/power_w sensor — only optional pack voltage.
+    Watts ≈ V * (V_rest - V) / R_esr from battery sag — HAT has no current shunt.
     """
     import json
 
-    from anx_bridge.power_sense import battery_volts
+    from anx_bridge.power_sense import last_sample, sample_power
 
     if not hasattr(ws_mod, "recv_msg"):
         return
     _orig_recv_msg = ws_mod.recv_msg
 
-    async def recv_msg_with_batt(websocket):
+    async def recv_msg_with_power(websocket):
         _send = websocket.send
 
         async def send_wrap(payload):
@@ -289,13 +305,9 @@ def _install_get_info_battery(ws_mod) -> None:
             if isinstance(obj, dict) and obj.get("title") == "get_info":
                 data = obj.get("data")
                 if isinstance(data, list) and len(data) == 3:
-                    batt = battery_volts()
-                    obj["data"] = [
-                        data[0],
-                        data[1],
-                        ("" if batt is None else str(batt)),
-                        data[2],
-                    ]
+                    sample = last_sample() or sample_power()
+                    watts = "" if sample is None else str(sample.power_w_est)
+                    obj["data"] = [data[0], data[1], watts, data[2]]
                     payload = json.dumps(obj)
             return await _send(payload)
 
@@ -305,8 +317,8 @@ def _install_get_info_battery(ws_mod) -> None:
         finally:
             websocket.send = _send  # type: ignore[method-assign]
 
-    ws_mod.recv_msg = recv_msg_with_batt
-    _log.info("wrapped webServer.recv_msg to inject Batt V into get_info")
+    ws_mod.recv_msg = recv_msg_with_power
+    _log.info("wrapped webServer.recv_msg to inject estimated watts into get_info")
 
 
 def _start_anx_bridge() -> None:
@@ -353,10 +365,14 @@ def _install_ui_https_rewrites() -> None:
             '"http://"+location.hostname+":5000/video_feed',
             'location.origin+"/video_feed',
         ),
-        # Status chips: insert Batt V under CPU Usage when get_info sends 4 values.
+        # Status chips: Load Power (est. W from battery sag) under CPU Usage.
         (
             'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["RAM","Usage",90,"%",70,85]]',
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Load","Power",0,"W",6,12],["RAM","Usage",90,"%",70,85]]',
+        ),
+        (
             'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Batt","Volt",0,"V",6.4,7.2],["RAM","Usage",90,"%",70,85]]',
+            'chips:[["CPU","Temp",50,"°C",55,70],["CPU","Usage",75,"%",70,85],["Load","Power",0,"W",6,12],["RAM","Usage",90,"%",70,85]]',
         ),
     )
 
@@ -399,13 +415,14 @@ def _install_latency_hud() -> None:
         _log.warning("latency HUD: could not read %s: %s", index, exc)
         return
     if marker in html:
-        # Still ensure arm-slider script tag is present.
+        # Still ensure overlay script tags are present.
+        extras = ""
         if "/anx/arm_sliders.js" not in html:
-            html = html.replace(
-                "</body>",
-                '<script src="/anx/arm_sliders.js" defer></script></body>',
-                1,
-            )
+            extras += '<script src="/anx/arm_sliders.js" defer></script>'
+        if "/anx/power_badge.js" not in html:
+            extras += '<script src="/anx/power_badge.js" defer></script>'
+        if extras:
+            html = html.replace("</body>", extras + "</body>", 1)
             try:
                 index.write_text(html, encoding="utf-8")
             except OSError:
@@ -444,6 +461,7 @@ def _install_latency_hud() -> None:
         "setInterval(tick,1000);tick();"
         "})();</script>"
         '<script src="/anx/arm_sliders.js" defer></script>'
+        '<script src="/anx/power_badge.js" defer></script>'
     )
     if "</body>" in html:
         html = html.replace("</body>", snippet + "</body>", 1)
@@ -721,11 +739,11 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     except Exception as exc:
         _log.warning("could not wrap webServer.robotCtrl: %s", exc)
 
-    # Extend get_info with battery volts (ADS7830) for status chips under CPU load.
+    # Extend get_info with estimated load watts for Hard Ware chips.
     try:
         _install_get_info_battery(ws_mod)
     except Exception as exc:
-        _log.warning("get_info battery wrap failed: %s", exc)
+        _log.warning("get_info power wrap failed: %s", exc)
 
     try:
         ws_mod.switch.switchSetup()

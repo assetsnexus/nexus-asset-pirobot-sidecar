@@ -29,6 +29,7 @@ from .metric_slots import (
 from .motion import MotionController
 from .odometry import side_speeds_mps, speed_mps
 from .sensors import SensorSuite
+from .servos import arm_rest_deg, park_arm_upright
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,8 @@ class HardwareExecutor:
             _quiet_servo_prints(RPIservo.ServoCtrl)
             sc = RPIservo.ServoCtrl()
             sc.moveInit()
+            # Shoulder (ch0) must rest upright; holding the arm forward stalls/overheats.
+            park_arm_upright(sc, deg=arm_rest_deg())
             sc.start()
             self._sc = sc
         except Exception:
@@ -427,8 +430,9 @@ class HardwareExecutor:
         elif action == "UDstop":
             sc.stopWiggle()
         elif action == "home":
-            for idx in range(5):
-                sc.moveServoInit(idx)
+            # moveServoInit expects a list of channel IDs.
+            sc.moveServoInit(list(range(5)))
+            park_arm_upright(sc, deg=arm_rest_deg())
         elif switch is None and action.startswith("Switch_"):
             logger.info("robot action %s (no GPIO switches)", action)
         elif action == "Switch_1_on":

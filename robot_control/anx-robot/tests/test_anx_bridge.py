@@ -503,3 +503,23 @@ def test_bridge_disabled_is_noop():
 
     # Must not raise when disabled
     start_bridge(config=BridgeConfig.from_env({"ANX_BRIDGE_ENABLED": "false"}))
+
+
+def test_arm_rest_deg_clamped(monkeypatch):
+    from anx_bridge.servos import arm_rest_deg, park_arm_upright
+
+    monkeypatch.setenv("ANX_ARM_REST_DEG", "90")
+    assert arm_rest_deg() == 90
+    monkeypatch.setenv("ANX_ARM_REST_DEG", "200")
+    assert arm_rest_deg() == 180
+
+    class _Fake:
+        def __init__(self):
+            self.calls = []
+
+        def initConfig(self, channel, deg, move_to):
+            self.calls.append((channel, deg, move_to))
+
+    fake = _Fake()
+    park_arm_upright(fake, deg=90)
+    assert fake.calls == [(0, 90, 1)]

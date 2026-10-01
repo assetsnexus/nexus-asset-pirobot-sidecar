@@ -34,6 +34,7 @@ services:
       - ANX_CONTROL_SOURCE=${ANX_CONTROL_SOURCE:-auto}
       - ANX_DEADMAN_MS=${ANX_DEADMAN_MS:-500}
       - ANX_TOPIC_PREFIX=${ANX_TOPIC_PREFIX:-rasptank}
+      - ANX_ARM_REST_DEG=${ANX_ARM_REST_DEG:-90}
       - MQTT_BROKER=${MQTT_BROKER:-mqtts://mqtt:8883}
       - MQTT_USER=${MQTT_USER:-anx}
       - MQTT_PASSWORD=${MQTT_PASSWORD:?set MQTT_PASSWORD (same as ipc-docker oem)}

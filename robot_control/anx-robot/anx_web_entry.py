@@ -333,6 +333,25 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
 
     ws_mod.flask_app = flask_webapp
     try:
+        from anx_bridge.servos import arm_rest_deg, park_arm_on_controllers
+
+        # Vendor constructs many ServoCtrl() after scGear.moveInit(); re-park
+        # shoulder so the arm rests upright (90°) instead of holding forward.
+        park_arm_on_controllers(
+            (
+                getattr(ws_mod, "scGear", None),
+                getattr(ws_mod, "H1_sc", None),
+                getattr(ws_mod, "H2_sc", None),
+                getattr(ws_mod, "P_sc", None),
+                getattr(ws_mod, "T_sc", None),
+                getattr(ws_mod, "G_sc", None),
+            ),
+            deg=arm_rest_deg(),
+        )
+    except Exception as exc:
+        _log.warning("arm upright park after webServer import failed: %s", exc)
+
+    try:
         ws_mod.switch.switchSetup()
         ws_mod.switch.set_all_switch_off()
     except Exception as exc:

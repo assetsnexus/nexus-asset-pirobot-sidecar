@@ -20,14 +20,15 @@ logger = logging.getLogger(__name__)
 
 ARM_CHANNEL = 0
 SERVO_CHANNELS = 8
-# Stock mid (90) holds the arm forward (stall). Endstops (0° and 180°) also
-# fight the horn when held — auto-park is disabled; this is only for explicit park.
-_DEFAULT_ARM_REST_DEG = 45
+# Stock mid (90°) stalls the shoulder forward. Init must aim 90° the other way
+# (0°) — never drive/hold 90° or 180° on channel 0.
+_DEFAULT_ARM_REST_DEG = 0
 
 _armed = False
 _primary_ctrl: Any = None
 _all_ctrls: List[Any] = []
 _hooks_installed = False
+_move_init_patched = False
 _release_lock = threading.Lock()
 
 
@@ -224,3 +225,57 @@ def install_shutdown_release_hooks() -> None:
         except Exception:
             logger.debug("could not install %s release hook", sig, exc_info=True)
     logger.info("servo release hooks installed (atexit + SIGTERM/SIGINT)")
+
+
+def install_vendor_move_init_patch() -> None:
+    """Patch vendor ``ServoCtrl.moveInit`` before webServer imports it.
+
+    Stock ``moveInit()`` drives every channel to mid (90°). On this tank that
+    jams the shoulder forward. We force shoulder init to ``ANX_ARM_REST_DEG``
+    (default 0° = 90° opposite from stock mid) then immediately drop PWM so
+    the pose is not held against a stop.
+    """
+    global _move_init_patched
+    if _move_init_patched:
+        return
+    try:
+        import RPIservo
+    except Exception as exc:
+        logger.warning("cannot patch RPIservo.moveInit (%s)", exc)
+        return
+
+    rest = arm_rest_deg()
+    try:
+        # Module-level defaults used when ServoCtrl builds initPos.
+        if hasattr(RPIservo, "init_pwm0"):
+            RPIservo.init_pwm0 = rest
+    except Exception:
+        logger.debug("could not set RPIservo.init_pwm0", exc_info=True)
+
+    if not hasattr(RPIservo, "ServoCtrl"):
+        return
+    orig = RPIservo.ServoCtrl.moveInit
+
+    def move_init_safe(self, *args, **kwargs):
+        try:
+            if hasattr(self, "initPos") and len(self.initPos) > ARM_CHANNEL:
+                self.initPos[ARM_CHANNEL] = arm_rest_deg()
+        except Exception:
+            logger.debug("initPos rewrite failed", exc_info=True)
+        try:
+            orig(self, *args, **kwargs)
+        finally:
+            register_servo_ctrl(self)
+            # Never leave holding torque after vendor init.
+            release_servos(self)
+            logger.info(
+                "moveInit patched: shoulder initPos=%s° then PWM released",
+                arm_rest_deg(),
+            )
+
+    RPIservo.ServoCtrl.moveInit = move_init_safe  # type: ignore[method-assign]
+    _move_init_patched = True
+    logger.info(
+        "patched RPIservo.ServoCtrl.moveInit (shoulder rest=%s°, then limp)",
+        rest,
+    )

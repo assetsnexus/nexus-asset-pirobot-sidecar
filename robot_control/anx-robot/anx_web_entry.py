@@ -652,6 +652,13 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     except Exception as exc:
         _log.warning("line GPIO release before webServer import failed: %s", exc)
     try:
+        from anx_bridge.servos import install_vendor_move_init_patch
+
+        # Re-assert before vendor `scGear.moveInit()` at import time.
+        install_vendor_move_init_patch()
+    except Exception as exc:
+        _log.warning("moveInit patch before webServer import failed: %s", exc)
+    try:
         import webServer as ws_mod
     except Exception as exc:
         _control_ws_state["error"] = f"webServer import failed: {exc}"
@@ -834,11 +841,16 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     try:
-        from anx_bridge.servos import install_shutdown_release_hooks
+        from anx_bridge.servos import (
+            install_shutdown_release_hooks,
+            install_vendor_move_init_patch,
+        )
 
         install_shutdown_release_hooks()
+        # Must run before HardwareExecutor / webServer construct ServoCtrl.moveInit.
+        install_vendor_move_init_patch()
     except Exception as exc:
-        _log.warning("servo shutdown hooks not installed: %s", exc)
+        _log.warning("servo shutdown/init hooks not installed: %s", exc)
     # Patch Camera.frames before app.py does `camera = Camera()` (starts the thread).
     _install_camera_frames_guard()
     _load_vendor_app()

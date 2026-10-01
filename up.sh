@@ -49,8 +49,8 @@ set_key MQTT_BROKER "mqtts://127.0.0.1:${MQTT_TLS_PORT}"
 set_key MQTT_USER anx
 set_key MQTT_CA_FILE "/certs/ca.crt"
 set_key ANX_TOPIC_PREFIX rasptank
-# Do not auto-park on connect (holding endstops overheats). Safe mid of shoulder band.
-set_key ANX_ARM_REST_DEG 45
+# Shoulder init: 0° = 90° opposite stock mid (90° stalls forward). Then limp.
+set_key ANX_ARM_REST_DEG 0
 
 # Self-signed TLS for https://:5000 and wss://:8888 (stock UI requires wss on HTTPS pages).
 # Always refresh so SAN includes current LAN/VPN addresses (browsers + curl -sk).

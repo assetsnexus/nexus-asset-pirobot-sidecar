@@ -22,11 +22,10 @@ class ServoLimit:
         return max(self.min_deg, min(self.max_deg, int(deg)))
 
 
-# Mechanical limits for the Adeept RaspTank arm used with this sidecar.
-# Avoid both electrical endstops (0° / 180°) — holding there overheats.
-# Shoulder: stock 90° stalls forward; keep clear of 0°/180° hard stops.
+# Shoulder: stock mid 90° stalls forward; init aims 0° (90° the other way).
+# Cap max below forward stall; allow 0° upright rest.
 RASPTANK_SERVO_LIMITS: Dict[int, ServoLimit] = {
-    0: ServoLimit(0, "Shoulder", 20, 85, 45),
+    0: ServoLimit(0, "Shoulder", 0, 85, 0),
     1: ServoLimit(1, "Elbow", 15, 165, 90),
     2: ServoLimit(2, "Wrist", 20, 160, 90),
     3: ServoLimit(3, "Gripper", 40, 140, 90),

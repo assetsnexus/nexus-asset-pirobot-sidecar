@@ -92,7 +92,7 @@ def _install_camera_frames_guard() -> None:
         _log.warning("camera_opencv unavailable for guard (%s)", exc)
         return
 
-    real_frames = cov.Camera.frames.__func__
+    real_frames = getattr(cov.Camera.__dict__.get("frames"), "__func__", None) or cov.Camera.frames
 
     @staticmethod
     def frames():

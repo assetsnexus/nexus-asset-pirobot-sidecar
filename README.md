@@ -49,6 +49,8 @@ Web UI: `https://<pi>:5000` (self-signed cert from `./up.sh` → `data/certs/`).
 
 Until the browser trusts the cert (click through the warning once, or import `data/certs/robot.crt`), clients abort the handshake with `CERTIFICATE_UNKNOWN` — gunicorn rate-limits that noise. Always use `curl -sk` for probes.
 
+Control WSS uses **port 8888**, which Chrome treats separately from the UI on **:5000**. If `wss://<pi>:8888` is denied, the UI shows a closable dialog with **Open cert page** → `https://<pi>:8888/` (accept the warning there, then reload the UI).
+
 ## How the MQTT bridge starts
 
 1. Process entry is `robot_control/anx-robot/anx_web_entry.py` (Docker `CMD` / systemd `ExecStart`).

@@ -278,8 +278,13 @@ def _install_servo_api(flask_app) -> None:
     def anx_power_badge_js():
         return _js("power_badge.js")
 
-    _log.info("servo + power APIs mounted (/anx/servos, /anx/power, static overlays)")
+    @flask_app.route("/anx/wss_cert_dialog.js")
+    def anx_wss_cert_dialog_js():
+        return _js("wss_cert_dialog.js")
 
+    _log.info(
+        "servo + power APIs mounted (/anx/servos, /anx/power, static overlays incl. wss cert dialog)"
+    )
 
 def _install_get_info_battery(ws_mod) -> None:
     """Inject battery SoC % into get_info (Hard Ware chip under CPU Usage)."""
@@ -402,7 +407,7 @@ def _install_ui_https_rewrites() -> None:
 
 
 def _install_latency_hud() -> None:
-    """Inject a small RTT / video latency badge into the stock index.html."""
+    """Inject latency HUD, WSS cert dialog (early), and Arm/Hard Ware overlays."""
     web_dir = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "/app"))
     if not web_dir.is_dir():
         web_dir = _WEB_DIR
@@ -416,62 +421,76 @@ def _install_latency_hud() -> None:
     except OSError as exc:
         _log.warning("latency HUD: could not read %s: %s", index, exc)
         return
-    if marker in html:
-        # Still ensure overlay script tags are present.
-        extras = ""
-        if "/anx/arm_sliders.js" not in html:
-            extras += '<script src="/anx/arm_sliders.js" defer></script>'
-        if "/anx/power_badge.js" not in html:
-            extras += '<script src="/anx/power_badge.js" defer></script>'
-        if extras:
-            html = html.replace("</body>", extras + "</body>", 1)
-            try:
-                index.write_text(html, encoding="utf-8")
-            except OSError:
-                pass
-        return
-    snippet = (
-        f"<script>{marker}\n"
-        "(function(){"
-        "var el=document.createElement('div');"
-        "el.id='anx-latency';"
-        "el.style.cssText='position:fixed;top:8px;right:8px;z-index:99999;"
-        "background:rgba(0,0,0,.7);color:#9f9;font:12px/1.4 ui-monospace,monospace;"
-        "padding:6px 10px;border-radius:4px;pointer-events:none;white-space:pre';"
-        "el.textContent='latency: —';"
-        "function mount(){if(document.body&&!document.getElementById('anx-latency'))"
-        "document.body.appendChild(el);}"
-        "if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);"
-        "else mount();"
-        "function paint(rtt,vid){"
-        "var parts=['RTT '+(rtt==null?'—':rtt+' ms')];"
-        "if(vid!=null)parts.push('video '+vid+' ms');"
-        "el.textContent=parts.join(' · ');"
-        "var n=rtt==null?999:rtt;"
-        "el.style.color=n<80?'#9f9':n<200?'#ff9':'#f99';"
-        "}"
-        "async function tick(){"
-        "var t0=performance.now();"
-        "try{"
-        "var r=await fetch('/health',{cache:'no-store'});"
-        "if(!r.ok)throw new Error('http '+r.status);"
-        "await r.json();"
-        "paint(Math.round(performance.now()-t0),window.__anxVideoMs);"
-        "}catch(e){paint(null,window.__anxVideoMs);el.style.color='#f99';"
-        "el.textContent='RTT err · video '+(window.__anxVideoMs==null?'—':window.__anxVideoMs+' ms');}"
-        "}"
-        "setInterval(tick,1000);tick();"
-        "})();</script>"
-        '<script src="/anx/arm_sliders.js" defer></script>'
-        '<script src="/anx/power_badge.js" defer></script>'
+
+    ws_port = int(os.environ.get("ROBOT_WS_PORT", "8888"))
+    head_hook = (
+        f"<script>window.__anxWsPort={ws_port};</script>"
+        '<script src="/anx/wss_cert_dialog.js"></script>'
     )
-    if "</body>" in html:
-        html = html.replace("</body>", snippet + "</body>", 1)
+    changed = False
+    if "/anx/wss_cert_dialog.js" not in html:
+        if "</head>" in html:
+            html = html.replace("</head>", head_hook + "</head>", 1)
+        else:
+            html = head_hook + html
+        changed = True
+
+    if marker not in html:
+        snippet = (
+            f"<script>{marker}\n"
+            "(function(){"
+            "var el=document.createElement('div');"
+            "el.id='anx-latency';"
+            "el.style.cssText='position:fixed;top:8px;right:8px;z-index:99999;"
+            "background:rgba(0,0,0,.7);color:#9f9;font:12px/1.4 ui-monospace,monospace;"
+            "padding:6px 10px;border-radius:4px;pointer-events:none;white-space:pre';"
+            "el.textContent='latency: —';"
+            "function mount(){if(document.body&&!document.getElementById('anx-latency'))"
+            "document.body.appendChild(el);}"
+            "if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);"
+            "else mount();"
+            "function paint(rtt,vid){"
+            "var parts=['RTT '+(rtt==null?'—':rtt+' ms')];"
+            "if(vid!=null)parts.push('video '+vid+' ms');"
+            "el.textContent=parts.join(' · ');"
+            "var n=rtt==null?999:rtt;"
+            "el.style.color=n<80?'#9f9':n<200?'#ff9':'#f99';"
+            "}"
+            "async function tick(){"
+            "var t0=performance.now();"
+            "try{"
+            "var r=await fetch('/health',{cache:'no-store'});"
+            "if(!r.ok)throw new Error('http '+r.status);"
+            "await r.json();"
+            "paint(Math.round(performance.now()-t0),window.__anxVideoMs);"
+            "}catch(e){paint(null,window.__anxVideoMs);el.style.color='#f99';"
+            "el.textContent='RTT err · video '+(window.__anxVideoMs==null?'—':window.__anxVideoMs+' ms');}"
+            "}"
+            "setInterval(tick,1000);tick();"
+            "})();</script>"
+            '<script src="/anx/arm_sliders.js" defer></script>'
+            '<script src="/anx/power_badge.js" defer></script>'
+        )
+        if "</body>" in html:
+            html = html.replace("</body>", snippet + "</body>", 1)
+        else:
+            html = html + snippet
+        changed = True
     else:
-        html = html + snippet
+        body_extras = ""
+        if "/anx/arm_sliders.js" not in html:
+            body_extras += '<script src="/anx/arm_sliders.js" defer></script>'
+        if "/anx/power_badge.js" not in html:
+            body_extras += '<script src="/anx/power_badge.js" defer></script>'
+        if body_extras:
+            html = html.replace("</body>", body_extras + "</body>", 1)
+            changed = True
+
+    if not changed:
+        return
     try:
         index.write_text(html, encoding="utf-8")
-        _log.info("injected latency HUD + arm sliders into %s", index)
+        _log.info("injected UI overlays (latency / wss cert dialog / arm+power) into %s", index)
     except OSError as exc:
         _log.warning("latency HUD: could not write %s: %s", index, exc)
 
@@ -873,8 +892,42 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
             finally:
                 _set_clients(max(0, clients["n"] - 1))
 
+        # Plain HTTPS GET on :8888 so a new-tab "accept cert" flow has a real page
+        # (browsers treat WSS :8888 trust separately from the UI :5000 cert).
+        _cert_html = (
+            "<!DOCTYPE html><html><head><meta charset=utf-8>"
+            "<title>ANX control TLS</title>"
+            "<style>body{font:15px/1.45 system-ui,sans-serif;max-width:36rem;"
+            "margin:3rem auto;padding:0 1rem;color:#1a1a1a}"
+            "code{background:#f0f0f0;padding:.1em .35em;border-radius:4px}</style>"
+            "</head><body>"
+            "<h1>Certificate accepted</h1>"
+            "<p>This is the robot <strong>control</strong> port "
+            "(WSS). You can close this tab and return to the UI — "
+            "the WebSocket should connect after a reload if needed.</p>"
+            "<p>Dev note: lab uses a self-signed cert from "
+            "<code>data/certs/robot.crt</code>.</p>"
+            "</body></html>"
+        )
+
+        async def process_request(connection, request):
+            """Serve a tiny HTML page for non-WebSocket GETs (cert-accept tab)."""
+            try:
+                upgrade = (request.headers.get("Upgrade") or "").lower()
+            except Exception:
+                upgrade = ""
+            if upgrade == "websocket":
+                return None
+            response = connection.respond(200, _cert_html)
+            try:
+                response.headers["Content-Type"] = "text/html; charset=utf-8"
+            except Exception:
+                pass
+            return response
+
         async def runner() -> None:
             serve_kwargs = {"ssl": ssl_ctx} if ssl_ctx is not None else {}
+            serve_kwargs["process_request"] = process_request
             scheme = "wss" if ssl_ctx is not None else "ws"
             # Stock webServer retries bind forever; keep a few attempts for docker races.
             last_exc: Exception | None = None
@@ -885,7 +938,7 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
                         _control_ws_state["error"] = None
                         _log.info(
                             "Adeept control WebSocket listening on %s://0.0.0.0:%s "
-                            "(UI login admin:123456)",
+                            "(UI login admin:123456; GET / serves cert-accept page)",
                             scheme,
                             port,
                         )

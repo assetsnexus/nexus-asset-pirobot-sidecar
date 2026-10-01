@@ -523,3 +523,54 @@ def test_arm_rest_deg_clamped(monkeypatch):
     fake = _Fake()
     park_arm_upright(fake, deg=90)
     assert fake.calls == [(0, 90, 1)]
+
+
+def test_idle_police_turns_on_after_quiet():
+    from anx_bridge.idle_police import IdlePoliceIndicator
+
+    class _Hw:
+        def __init__(self):
+            self.modes = []
+
+        def set_idle_police(self, active: bool) -> None:
+            self.modes.append(active)
+
+    clock = {"t": 0.0}
+    hw = _Hw()
+    idle = IdlePoliceIndicator(hw, idle_ms=1000, clock=lambda: clock["t"])
+    idle.tick()
+    assert hw.modes == []
+    clock["t"] = 1.0
+    idle.tick()
+    assert hw.modes == [True]
+    idle.note_control()
+    assert hw.modes == [True, False]
+    clock["t"] = 1.5
+    idle.tick()
+    assert hw.modes == [True, False]
+    clock["t"] = 2.6
+    idle.tick()
+    assert hw.modes == [True, False, True]
+
+
+def test_idle_police_manual_override():
+    from anx_bridge.idle_police import IdlePoliceIndicator
+
+    class _Hw:
+        def __init__(self):
+            self.modes = []
+
+        def set_idle_police(self, active: bool) -> None:
+            self.modes.append(active)
+
+    clock = {"t": 0.0}
+    hw = _Hw()
+    idle = IdlePoliceIndicator(hw, idle_ms=500, clock=lambda: clock["t"])
+    idle.note_police_command(True)
+    clock["t"] = 10.0
+    idle.tick()
+    assert hw.modes == []  # manual police; auto does not re-apply
+    idle.note_police_command(False)
+    clock["t"] = 10.6
+    idle.tick()
+    assert hw.modes == [True]

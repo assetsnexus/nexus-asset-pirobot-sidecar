@@ -154,10 +154,12 @@ class HardwareExecutor:
         self._motion: Optional[MotionController] = None
         self._deadman = None
         self._publish_fast = None
+        self._idle_police = None
 
-    def attach_runtime(self, deadman=None, publish_fast=None) -> None:
+    def attach_runtime(self, deadman=None, publish_fast=None, idle_police=None) -> None:
         self._deadman = deadman
         self._publish_fast = publish_fast
+        self._idle_police = idle_police
         if self._motion is not None:
             self._motion.attach(
                 set_timed_motion_active=(
@@ -313,6 +315,24 @@ class HardwareExecutor:
         # Dry-run / live: update typed metric slots from action bindings.
         # Hardware servo positions override range slots in _servo_telemetry.
         self._metrics.apply_action(action)
+        if self._idle_police is not None:
+            if action == "police":
+                self._idle_police.note_police_command(True)
+            elif action == "police_off":
+                self._idle_police.note_police_command(False)
+            elif action not in (
+                "DS",
+                "TS",
+                "stop",
+                "allStop",
+                "armStop",
+                "handStop",
+                "LRstop",
+                "GLstop",
+                "UDstop",
+            ):
+                # Failsafe stops must not look like remote control (would cancel idle lights).
+                self._idle_police.note_control()
         if action in (
             "turn_left_90",
             "turn_right_90",
@@ -520,6 +540,13 @@ class HardwareExecutor:
             except Exception as exc:
                 logger.debug("police_off failed: %s", exc)
         logger.info("robot action police_off (no WS2812)")
+
+    def set_idle_police(self, active: bool) -> None:
+        """Overlay idle indicator — same LED modes as police / police_off."""
+        if active:
+            self._police_on()
+        else:
+            self._police_off()
 
     def _sample_hardware_servos(self) -> None:
         """When the HAT is live, range slots track nowPos instead of dry-run nudges."""

@@ -364,6 +364,25 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     except Exception as exc:
         _log.warning("arm upright park after webServer import failed: %s", exc)
 
+    # Overlay-only wrap: stock UI commands count as remote control for idle lights.
+    try:
+        from anx_bridge import note_ui_control
+
+        if hasattr(ws_mod, "robotCtrl"):
+            _orig_robot_ctrl = ws_mod.robotCtrl
+
+            def _robot_ctrl_with_idle(command_input, response):
+                try:
+                    note_ui_control()
+                except Exception:
+                    pass
+                return _orig_robot_ctrl(command_input, response)
+
+            ws_mod.robotCtrl = _robot_ctrl_with_idle
+            _log.info("wrapped webServer.robotCtrl for idle police indicator")
+    except Exception as exc:
+        _log.warning("could not wrap webServer.robotCtrl for idle lights: %s", exc)
+
     try:
         ws_mod.switch.switchSetup()
         ws_mod.switch.set_all_switch_off()

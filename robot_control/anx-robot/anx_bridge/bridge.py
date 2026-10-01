@@ -18,6 +18,7 @@ from .controller_input import (
 )
 from .deadman import Deadman
 from .hardware import HardwareExecutor
+from .idle_police import IdlePoliceIndicator
 from .mqtt_bridge import MqttBridge
 from .mqtt_client import PahoSession
 from .telemetry import build_telemetry
@@ -28,6 +29,7 @@ _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 _session: Optional[PahoSession] = None
 _deadman: Optional[Deadman] = None
+_idle_police: Optional[IdlePoliceIndicator] = None
 
 SampleFn = Callable[[str, int], dict]
 
@@ -38,12 +40,18 @@ def poke_node_heartbeat() -> None:
         _deadman.poke_node_heartbeat()
 
 
+def note_ui_control() -> None:
+    """Stock Adeept UI drove a command — clears idle police the same as MQTT/USB."""
+    if _idle_police is not None:
+        _idle_police.note_control()
+
+
 def start_bridge(
     config: Optional[BridgeConfig] = None,
     executor: Optional[Callable] = None,
     sample: Optional[SampleFn] = None,
 ) -> None:
-    global _thread, _session, _deadman
+    global _thread, _session, _deadman, _idle_police
     cfg = config or BridgeConfig.from_env()
     if not cfg.enabled:
         logger.info("ANX bridge disabled (ANX_BRIDGE_ENABLED)")
@@ -68,6 +76,21 @@ def start_bridge(
     )
     _deadman = deadman
 
+    idle_police = None
+    if isinstance(executor, HardwareExecutor) and cfg.idle_police_enabled:
+        idle_police = IdlePoliceIndicator(
+            executor,
+            idle_ms=cfg.idle_police_ms,
+            enabled=True,
+        )
+        _idle_police = idle_police
+        logger.info(
+            "idle police lights enabled (quiet >= %sms → WS2812 police blink)",
+            cfg.idle_police_ms,
+        )
+    else:
+        _idle_police = None
+
     published_holder: dict = {}
 
     def publish_fast(body: dict) -> None:
@@ -76,7 +99,9 @@ def start_bridge(
             bridge.publish_telemetry_fast(body)
 
     if isinstance(executor, HardwareExecutor):
-        executor.attach_runtime(deadman=deadman, publish_fast=publish_fast)
+        executor.attach_runtime(
+            deadman=deadman, publish_fast=publish_fast, idle_police=idle_police
+        )
 
     try:
         mapping = load_map(cfg.controller_map_path)
@@ -142,6 +167,8 @@ def start_bridge(
         last_full = 0.0
         while not _stop.wait(0.05):
             deadman.tick()
+            if idle_police is not None:
+                idle_police.tick()
             now = time.monotonic()
             # Fast range publish (~20 Hz) so asset-node guards can see mm promptly.
             if isinstance(executor, HardwareExecutor):
@@ -166,6 +193,7 @@ def start_bridge(
 
 
 def stop_bridge() -> None:
-    global _deadman
+    global _deadman, _idle_police
     _stop.set()
     _deadman = None
+    _idle_police = None

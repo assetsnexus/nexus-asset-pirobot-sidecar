@@ -46,6 +46,8 @@ class BridgeConfig:
     control_source: str  # auto | usb | mqtt
     controller_map_path: str
     deadman_ms: int
+    idle_police_enabled: bool
+    idle_police_ms: int
     motion: OverlayMotionConfig
 
     @classmethod
@@ -63,6 +65,18 @@ class BridgeConfig:
             raise BridgeConfigError("ANX_DEADMAN_MS must be an integer") from exc
         if deadman < 50:
             raise BridgeConfigError("ANX_DEADMAN_MS must be >= 50")
+        idle_police_enabled = env.get("ANX_IDLE_POLICE", "true").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        try:
+            idle_police_ms = int(env.get("ANX_IDLE_POLICE_MS", "3000"))
+        except ValueError as exc:
+            raise BridgeConfigError("ANX_IDLE_POLICE_MS must be an integer") from exc
+        if idle_police_ms < 200:
+            raise BridgeConfigError("ANX_IDLE_POLICE_MS must be >= 200")
         motion = OverlayMotionConfig(
             wheel_diameter_m=_float_env(env, "ANX_WHEEL_DIAMETER_M", DEFAULT_WHEEL_DIAMETER_M),
             track_width_m=_float_env(env, "ANX_TRACK_WIDTH_M", DEFAULT_TRACK_WIDTH_M),
@@ -111,6 +125,8 @@ class BridgeConfig:
             control_source=source,
             controller_map_path=env.get("ANX_CONTROLLER_MAP", default_map).strip() or default_map,
             deadman_ms=deadman,
+            idle_police_enabled=idle_police_enabled,
+            idle_police_ms=idle_police_ms,
             motion=motion,
         )
 

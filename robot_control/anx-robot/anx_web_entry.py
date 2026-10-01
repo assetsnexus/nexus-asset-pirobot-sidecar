@@ -11,6 +11,7 @@ import importlib.util
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -35,6 +36,85 @@ if str(_WEB_DIR) not in sys.path:
 _vendor = None
 app = Flask(__name__)
 _log = logging.getLogger("anx_web_entry")
+
+
+def _placeholder_jpeg() -> bytes:
+    """Black 640x480 JPEG so /video_feed stays alive when libcamera sees no sensor."""
+    try:
+        import cv2
+        import numpy as np
+
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(
+            img,
+            "NO CAMERA (map /dev/video* + /run/udev)",
+            (40, 240),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        ok, buf = cv2.imencode(".jpg", img)
+        if ok:
+            return buf.tobytes()
+    except Exception as exc:
+        _log.warning("placeholder frame encode failed: %s", exc)
+    # Minimal JPEG (1x1 pixel) if OpenCV is unavailable.
+    return (
+        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+        b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t"
+        b"\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a"
+        b"\x1f\x1e\x1d\x1a\x1c\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342"
+        b"\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00"
+        b"\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b"
+        b"\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xaa\xff\xd9"
+    )
+
+
+def _placeholder_frames():
+    jpeg = _placeholder_jpeg()
+    while True:
+        yield jpeg
+        time.sleep(0.05)
+
+
+def _install_camera_frames_guard() -> None:
+    """Wrap vendor Camera.frames before app.py constructs Camera().
+
+    Vendor Picamera2() raises IndexError when libcamera's camera list is empty
+    (typical if /dev/video* or /run/udev were not passed into the container).
+    """
+    try:
+        import camera_opencv as cov
+    except Exception as exc:
+        _log.warning("camera_opencv unavailable for guard (%s)", exc)
+        return
+
+    real_frames = cov.Camera.frames.__func__
+
+    @staticmethod
+    def frames():
+        try:
+            from picamera2 import Picamera2
+
+            infos = Picamera2.global_camera_info()
+        except Exception as exc:
+            _log.error("libcamera probe failed (%s); serving placeholder video", exc)
+            yield from _placeholder_frames()
+            return
+        if not infos:
+            _log.error(
+                "libcamera sees 0 cameras — map /dev/video* /dev/media* /dev/dma_heap* "
+                "and mount /run/udev (re-run ./up.sh). Serving placeholder video."
+            )
+            yield from _placeholder_frames()
+            return
+        _log.info("libcamera cameras: %s", infos)
+        yield from real_frames()
+
+    cov.Camera.frames = frames
 
 
 def _load_vendor_app():
@@ -135,6 +215,8 @@ def _start_anx_bridge() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    # Patch Camera.frames before app.py does `camera = Camera()` (starts the thread).
+    _install_camera_frames_guard()
     _load_vendor_app()
     _install_static_fallback()
     _install_health()

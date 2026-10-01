@@ -79,7 +79,7 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 
 ## Healthcheck
 
-Compose probes `GET /health` on port 5000 (unauthenticated JSON `{ ok: true }`), served by `robot_control/anx-robot/anx_web_entry.py` — not by editing vendor `app.py`. The image installs Raspberry Pi `python3-opencv` / `python3-picamera2` / `python3-libcamera` so Adeept `app.py` can import; if that still fails, the overlay serves `web/dist` static UI so `/` is not a blank 404.
+Compose probes `GET /health` on port 5000 (unauthenticated JSON `{ ok: true }`), served by `robot_control/anx-robot/anx_web_entry.py` — not by editing vendor `app.py`. The image installs Raspberry Pi `python3-opencv` / `python3-picamera2` / `python3-libcamera` so Adeept `app.py` can import; if that still fails, the overlay serves `web/dist` static UI so `/` is not a blank 404. `./up.sh` maps `/dev/video*` `/dev/media*` `/dev/dma_heap*` and mounts `/run/udev` so Picamera2 can see the CSI camera; without those, libcamera's camera list is empty and the overlay serves a placeholder `/video_feed` instead of crashing the camera thread.
 
 ## Native (non-Docker) on the Pi
 

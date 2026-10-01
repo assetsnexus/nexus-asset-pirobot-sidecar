@@ -16,6 +16,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from anx_tls import ssl_server_context, tls_enabled
+
 _OVERLAY_DIR = Path(__file__).resolve().parent
 _WEB_DIR = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "")).resolve() if os.environ.get("ANX_ROBOT_WEB_DIR") else (
     _OVERLAY_DIR.parent / "adeept_rasptank2" / "web"
@@ -36,6 +38,14 @@ if str(_WEB_DIR) not in sys.path:
 _vendor = None
 app = Flask(__name__)
 _log = logging.getLogger("anx_web_entry")
+
+# Updated by the control-WS thread; exposed on GET /health for deploy diagnosis.
+_control_ws_state: dict = {
+    "listening": False,
+    "port": int(os.environ.get("ROBOT_WS_PORT", "8888")),
+    "scheme": "ws",
+    "error": None,
+}
 
 
 def _placeholder_jpeg() -> bytes:
@@ -195,7 +205,15 @@ def _install_health() -> None:
 
     @app.route("/health")
     def health():
-        return jsonify({"ok": True, "service": "anx-robot-sidecar"}), 200
+        tls_on = tls_enabled() and ssl_server_context() is not None
+        return jsonify(
+            {
+                "ok": True,
+                "service": "anx-robot-sidecar",
+                "tls": tls_on,
+                "control_ws": dict(_control_ws_state),
+            }
+        ), 200
 
 
 def _start_anx_bridge() -> None:
@@ -213,6 +231,62 @@ def _start_anx_bridge() -> None:
         log.warning("ANX bridge not started: %s", exc)
 
 
+def _install_ws_scheme_rewrite() -> None:
+    """Stock UI hardcodes ws://host:8888. Make the scheme follow the page protocol.
+
+    On HTTPS pages browsers block ws:// (mixed content). A hardcoded wss:// would
+    break plain HTTP. Protocol-relative selection works for both.
+    """
+    web_dir = Path(os.environ.get("ANX_ROBOT_WEB_DIR", "/app"))
+    if not web_dir.is_dir():
+        web_dir = _WEB_DIR
+    needle_ws = '"ws://"+location.hostname'
+    needle_wss = '"wss://"+location.hostname'
+    repl = '("https:"===location.protocol?"wss://":"ws://")+location.hostname'
+    patched = 0
+    for path in web_dir.rglob("*.js"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            _log.warning("could not read %s for ws scheme rewrite: %s", path, exc)
+            continue
+        if needle_ws not in text and needle_wss not in text:
+            continue
+        text = text.replace(needle_ws, repl).replace(needle_wss, repl)
+        try:
+            path.write_text(text, encoding="utf-8")
+            patched += 1
+            _log.info("patched WebSocket scheme to follow location.protocol in %s", path)
+        except OSError as exc:
+            _log.warning("could not patch %s for ws scheme: %s", path, exc)
+    if patched:
+        _log.info("patched %s JS file(s) for protocol-aware control WebSocket URL", patched)
+
+
+def _flask_ssl_args() -> dict:
+    ctx = ssl_server_context()
+    return {"ssl_context": ctx} if ctx is not None else {}
+
+
+def _patch_webapp_for_tls(web) -> None:
+    """Vendor webapp.thread() calls app.run without TLS — inject ssl_context when enabled."""
+    ctx = ssl_server_context()
+    if ctx is None:
+        if tls_enabled():
+            _log.warning("ANX_ROBOT_TLS=true but cert/key missing; Flask stays on HTTP")
+        return
+    flask_app = getattr(_vendor, "app", None)
+    if flask_app is None:
+        return
+    http_port = int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
+
+    def thread(_self=None):
+        flask_app.run(host="0.0.0.0", port=http_port, threaded=True, ssl_context=ctx)
+
+    web.thread = thread
+    _log.info("Flask UI TLS enabled on 0.0.0.0:%s (self-signed)", http_port)
+
+
 def _start_adeept_control_websocket(flask_webapp) -> None:
     """Run vendor webServer.py control WebSocket on :8888 (UI hardcodes that port).
 
@@ -220,15 +294,41 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     websocket. Our entry only started Flask, so the camera UI loaded but control
     failed with ``ws://host:8888`` connection errors.
     """
+    import threading
+    import traceback
+
+    port = int(os.environ.get("ROBOT_WS_PORT", "8888"))
+    _control_ws_state["port"] = port
+    _control_ws_state["listening"] = False
+    _control_ws_state["error"] = None
+
     if _vendor is None:
+        _control_ws_state["error"] = "vendor app not loaded"
+        _log.error("control WebSocket not started: vendor app not loaded")
         return
+
+    try:
+        import websockets  # noqa: F401 — fail fast before heavy vendor import
+    except Exception as exc:
+        _control_ws_state["error"] = f"websockets package missing: {exc}"
+        _log.error(
+            "control WebSocket disabled: websockets not installed (%s). "
+            "Rebuild image so requirements-bridge.txt is applied.",
+            exc,
+        )
+        return
+
     # webServer does ``import app`` — reuse the already-loaded vendor module so
     # Camera()/Flask are not constructed a second time.
     sys.modules.setdefault("app", _vendor)
     try:
         import webServer as ws_mod
     except Exception as exc:
-        _log.warning("Adeept webServer.py could not be imported (%s); UI control WS disabled", exc)
+        _control_ws_state["error"] = f"webServer import failed: {exc}"
+        _log.error(
+            "Adeept webServer.py could not be imported; UI control WS disabled:\n%s",
+            traceback.format_exc(),
+        )
         return
 
     ws_mod.flask_app = flask_webapp
@@ -238,59 +338,102 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
     except Exception as exc:
         _log.warning("Adeept switch setup failed: %s", exc)
 
-    port = int(os.environ.get("ROBOT_WS_PORT", "8888"))
+    try:
+        import move
+
+        move.setup()
+    except Exception as exc:
+        _log.warning("Adeept move.setup() failed (WS will still listen): %s", exc)
+
+    ssl_ctx = ssl_server_context()
+    _control_ws_state["scheme"] = "wss" if ssl_ctx is not None else "ws"
 
     def _run() -> None:
         import asyncio
 
-        try:
-            import websockets
-        except Exception as exc:
-            _log.error("websockets package missing (%s); pip install websockets==13.0", exc)
-            return
+        import websockets
 
         async def handler(websocket):
-            # websockets>=10 dropped the path argument; vendor still declares it.
+            # websockets>=10 dropped the path argument; vendor main_logic still has it.
             await ws_mod.check_permit(websocket)
             await ws_mod.recv_msg(websocket)
 
         async def runner() -> None:
-            async with websockets.serve(handler, "0.0.0.0", port):
-                _log.info("Adeept control WebSocket listening on 0.0.0.0:%s (UI login admin:123456)", port)
-                await asyncio.Future()
+            serve_kwargs = {"ssl": ssl_ctx} if ssl_ctx is not None else {}
+            scheme = "wss" if ssl_ctx is not None else "ws"
+            # Stock webServer retries bind forever; keep a few attempts for docker races.
+            last_exc: Exception | None = None
+            for attempt in range(1, 6):
+                try:
+                    async with websockets.serve(handler, "0.0.0.0", port, **serve_kwargs):
+                        _control_ws_state["listening"] = True
+                        _control_ws_state["error"] = None
+                        _log.info(
+                            "Adeept control WebSocket listening on %s://0.0.0.0:%s "
+                            "(UI login admin:123456)",
+                            scheme,
+                            port,
+                        )
+                        await asyncio.Future()
+                    return
+                except OSError as exc:
+                    last_exc = exc
+                    _log.warning(
+                        "control WebSocket bind attempt %s/5 failed: %s", attempt, exc
+                    )
+                    await asyncio.sleep(1.0)
+            _control_ws_state["listening"] = False
+            _control_ws_state["error"] = f"bind failed: {last_exc}"
+            _log.error("Adeept control WebSocket could not bind :%s (%s)", port, last_exc)
 
         try:
             asyncio.run(runner())
         except Exception as exc:
-            _log.error("Adeept control WebSocket exited: %s", exc)
-
-    import threading
+            _control_ws_state["listening"] = False
+            _control_ws_state["error"] = str(exc)
+            _log.error(
+                "Adeept control WebSocket exited:\n%s", traceback.format_exc()
+            )
 
     threading.Thread(target=_run, name="adeept-control-ws", daemon=True).start()
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     # Patch Camera.frames before app.py does `camera = Camera()` (starts the thread).
     _install_camera_frames_guard()
     _load_vendor_app()
     _install_static_fallback()
     _install_health()
+    _install_ws_scheme_rewrite()
     _start_anx_bridge()
     # Prefer the vendor webapp bootstrap (camera + Flask thread) when available.
-    if hasattr(_vendor, "webapp"):
+    if _vendor is not None and hasattr(_vendor, "webapp"):
         web = _vendor.webapp()
+        _patch_webapp_for_tls(web)
         _start_adeept_control_websocket(web)
         web.startthread()
-        # Non-daemon Flask thread keeps the process alive; block main for systemd/docker.
+        # Keep the process alive on the non-daemon Flask thread.
         import threading
 
-        for t in threading.enumerate():
-            if t is not threading.current_thread() and t.is_alive():
+        flask_threads = [
+            t
+            for t in threading.enumerate()
+            if t is not threading.current_thread() and t.is_alive() and not t.daemon
+        ]
+        if flask_threads:
+            for t in flask_threads:
                 t.join()
+            return
+        # Fallback if Flask was marked daemon somehow.
+        threading.Event().wait()
         return
     port = int(os.environ.get("ROBOT_HTTP_PORT", os.environ.get("PORT", "5000")))
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    _start_adeept_control_websocket(app)
+    app.run(host="0.0.0.0", port=port, threaded=True, **_flask_ssl_args())
 
 
 if __name__ == "__main__":

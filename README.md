@@ -28,7 +28,7 @@ pip install -r robot_control/anx-robot/requirements-bridge.txt
 python robot_control/anx-robot/anx_web_entry.py
 ```
 
-A USB gamepad uses the Xbox map in `robot_control/anx-robot/anx_bridge/controller_map.xbox.json` (`evdev`, `/dev/input`). MQTT clients publish on `{ANX_TOPIC_PREFIX}/controller/+` — see [MQTT_CONTROLLER_CONTRACT.md](./MQTT_CONTROLLER_CONTRACT.md). Check `http://127.0.0.1:5000/health`.
+A USB gamepad uses the Xbox map in `robot_control/anx-robot/anx_bridge/controller_map.xbox.json` (`evdev`, `/dev/input`). MQTT clients publish on `{ANX_TOPIC_PREFIX}/controller/+` — see [MQTT_CONTROLLER_CONTRACT.md](./MQTT_CONTROLLER_CONTRACT.md). Check `https://127.0.0.1:5000/health` (`curl -sk`).
 
 Joining the ANX IPC Mosquitto stack is below.
 
@@ -40,12 +40,12 @@ The edge node must already be up (`./up.sh` in the sibling checkout `nexus-asset
 git clone --recurse-submodules https://github.com/assetsnexus/nexus-asset-pirobot-sidecar.git
 cd nexus-asset-pirobot-sidecar
 ./up.sh
-curl -sf http://127.0.0.1:5000/health
+curl -sk https://127.0.0.1:5000/health
 ```
 
 `./up.sh` copies the MQTT password from the edge node, turns the bridge on, and runs `docker compose up -d --build`. Then pair the edge node with any one of the four methods in the IPC README (manual ZIP, USB, Bluetooth, pairing link).
 
-Web UI: `http://<pi>:5000` (stock Adeept WS login is `admin` / `123456`). Control uses `ws://<pi>:8888` (published by compose).
+Web UI: `https://<pi>:5000` (self-signed cert from `./up.sh` → `data/certs/`). Control uses `wss://<pi>:8888`. Stock Adeept WS login is `admin` / `123456`. Set `ANX_ROBOT_TLS=false` to fall back to plain HTTP/WS.
 
 ## How the MQTT bridge starts
 

@@ -49,6 +49,35 @@ set_key MQTT_CA_FILE "/certs/ca.crt"
 set_key IPC_DOCKER_NETWORK anx-assets-ipc-network
 set_key ANX_TOPIC_PREFIX rasptank
 
+# Self-signed TLS for https://:5000 and wss://:8888 (stock UI requires wss on HTTPS pages).
+TLS_DIR="${ROBOT_TLS_DIR:-$ROOT/data/certs}"
+mkdir -p "$TLS_DIR"
+if [[ ! -f "$TLS_DIR/robot.key" || ! -f "$TLS_DIR/robot.crt" ]]; then
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "ERROR: openssl is required to generate the robot UI TLS certificate" >&2
+    exit 1
+  fi
+  HOSTNAME_FQDN="$(hostname -f 2>/dev/null || hostname || echo localhost)"
+  HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo localhost)"
+  # Include common LAN addresses so browsers accept the cert for the Pi IP.
+  SAN="DNS:localhost,DNS:${HOSTNAME_SHORT},DNS:${HOSTNAME_FQDN},IP:127.0.0.1"
+  while read -r ip; do
+    [[ -n "$ip" ]] || continue
+    SAN="${SAN},IP:${ip}"
+  done < <(hostname -I 2>/dev/null | tr ' ' '\n' | head -8)
+  echo "Generating self-signed TLS cert (${TLS_DIR}/robot.crt) SAN=${SAN}"
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 825 \
+    -keyout "$TLS_DIR/robot.key" \
+    -out "$TLS_DIR/robot.crt" \
+    -subj "/CN=${HOSTNAME_SHORT}/O=ANX Robot Sidecar" \
+    -addext "subjectAltName=${SAN}"
+  chmod 640 "$TLS_DIR/robot.key" "$TLS_DIR/robot.crt" || true
+fi
+set_key ANX_ROBOT_TLS true
+set_key ANX_ROBOT_TLS_CERT /certs/tls/robot.crt
+set_key ANX_ROBOT_TLS_KEY /certs/tls/robot.key
+set_key ROBOT_TLS_DIR "$TLS_DIR"
+
 # lgpio opens /dev/gpiochip*. The PCA9685 motors use /dev/i2c-*.
 # Picamera2/libcamera need /dev/video* /dev/media* /dev/dma_heap* (and /run/udev
 # from docker-compose.yml). privileged does not put those nodes in the container.
@@ -101,6 +130,7 @@ PORT="$(grep -E '^ROBOT_HTTP_PORT=' .env | head -1 | cut -d= -f2- || true)"
 PORT="${PORT:-5000}"
 echo ""
 echo "Robot sidecar is up (image built locally, no registry)."
-echo "Health: curl -sf http://127.0.0.1:${PORT}/health"
-echo "UI: http://<pi-ip>:${PORT}/  Control WS: ws://<pi-ip>:8888  (login admin:123456)"
+echo "Health: curl -sk https://127.0.0.1:${PORT}/health"
+echo "UI: https://<pi-ip>:${PORT}/  Control WSS: wss://<pi-ip>:8888  (login admin:123456)"
+echo "Browser will warn on the self-signed cert from data/certs/robot.crt — that is expected."
 echo "Pair the edge node with any one method: manual ZIP, USB, Bluetooth, or pairing link."

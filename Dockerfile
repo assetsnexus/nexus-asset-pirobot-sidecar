@@ -36,13 +36,18 @@ RUN pip install --no-cache-dir --upgrade 'pip==26.2.1' \
 
 COPY robot_control/adeept_rasptank2/web /app
 COPY robot_control/anx-robot/anx_web_entry.py /overlay/anx_web_entry.py
+COPY robot_control/anx-robot/anx_tls.py /overlay/anx_tls.py
 COPY robot_control/anx-robot/anx_bridge /overlay/anx_bridge
 
 ENV PYTHONUNBUFFERED=1
 ENV ANX_ROBOT_WEB_DIR=/app
+ENV ANX_ROBOT_TLS=true
+ENV ANX_ROBOT_TLS_CERT=/certs/tls/robot.crt
+ENV ANX_ROBOT_TLS_KEY=/certs/tls/robot.key
 EXPOSE 5000 8888
 
+# /health is HTTPS when ANX_ROBOT_TLS=true (default).
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=40s \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)"
+  CMD python -c "import os,ssl,urllib.request; ctx=ssl._create_unverified_context() if os.environ.get('ANX_ROBOT_TLS','true').lower() in ('1','true','yes','on') else None; urllib.request.urlopen('https://127.0.0.1:5000/health' if ctx is not None else 'http://127.0.0.1:5000/health', context=ctx, timeout=5)"
 
 CMD ["python", "/overlay/anx_web_entry.py"]

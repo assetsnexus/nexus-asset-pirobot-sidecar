@@ -56,6 +56,87 @@ def register_servo_ctrl(servo_ctrl: Any) -> None:
     _primary_ctrl = servo_ctrl
     if servo_ctrl not in _all_ctrls:
         _all_ctrls.append(servo_ctrl)
+    apply_shoulder_endstops(servo_ctrl)
+
+
+def all_servo_ctrls() -> List[Any]:
+    return [c for c in _all_ctrls if c is not None]
+
+
+def apply_shoulder_endstops(ctrl: Any = None) -> None:
+    """Clamp PCA channel-0 software stops to overlay shoulder limits.
+
+    Vendor defaults are 0–180°. A leftover ``wiggle`` thread will drive to
+    ``maxPos[0]`` and stall the horn past the mechanical stop. Keep every
+    registered ServoCtrl's ch0 window inside the safe overlay range.
+    """
+    try:
+        from .servo_limits import servo_limit
+
+        lim = servo_limit(ARM_CHANNEL)
+    except Exception:
+        return
+    targets = [ctrl] if ctrl is not None else all_servo_ctrls()
+    for sc in targets:
+        if sc is None:
+            continue
+        try:
+            if hasattr(sc, "minPos") and len(sc.minPos) > ARM_CHANNEL:
+                sc.minPos[ARM_CHANNEL] = int(lim.min_deg)
+            if hasattr(sc, "maxPos") and len(sc.maxPos) > ARM_CHANNEL:
+                sc.maxPos[ARM_CHANNEL] = int(lim.max_deg)
+            if hasattr(sc, "initPos") and len(sc.initPos) > ARM_CHANNEL:
+                # Never leave stock mid (90°) as the init target for shoulder.
+                if int(sc.initPos[ARM_CHANNEL]) > lim.max_deg:
+                    sc.initPos[ARM_CHANNEL] = int(lim.rest_deg)
+        except Exception:
+            logger.debug("apply_shoulder_endstops failed", exc_info=True)
+
+
+def sync_channel_soft_state(channel: int, pwm_deg: int) -> None:
+    """Mirror software position on every ServoCtrl without extra PCA writes.
+
+    Adeept keeps 5–6 controllers on one PCA9685. Absolute writes go through the
+    bound ctrl; other instances must not keep a stale goal/buffer that a later
+    resume/wiggle would chase past the endstop.
+    """
+    pwm_i = int(pwm_deg)
+    for sc in all_servo_ctrls():
+        try:
+            if hasattr(sc, "nowPos") and len(sc.nowPos) > channel:
+                sc.nowPos[channel] = pwm_i
+            if hasattr(sc, "lastPos") and len(sc.lastPos) > channel:
+                sc.lastPos[channel] = pwm_i
+            if hasattr(sc, "goalPos") and len(sc.goalPos) > channel:
+                sc.goalPos[channel] = pwm_i
+            if hasattr(sc, "bufferPos") and len(sc.bufferPos) > channel:
+                sc.bufferPos[channel] = float(pwm_i)
+        except Exception:
+            logger.debug("sync_channel_soft_state ch%s failed", channel, exc_info=True)
+
+
+def stop_all_wiggle() -> None:
+    """Pause every vendor ServoCtrl thread.
+
+    Adeept creates several ``ServoCtrl`` instances (scGear, H1_sc, …) that all
+    talk to the same PCA9685. One thread left in ``wiggle`` mode will keep
+    writing channel 0 toward 180° and fight absolute slider/hold commands.
+    """
+    apply_shoulder_endstops()
+    for ctrl in all_servo_ctrls():
+        try:
+            if hasattr(ctrl, "stopWiggle"):
+                ctrl.stopWiggle()
+            elif hasattr(ctrl, "pause"):
+                ctrl.pause()
+            # Do NOT switch to 'auto' — that resumes moveAuto toward goalPos
+            # (often stock mid/180) the next time the thread is resumed.
+            if hasattr(ctrl, "scMode") and getattr(ctrl, "scMode", None) == "wiggle":
+                ctrl.scMode = "certain"
+            if hasattr(ctrl, "wiggleDirection"):
+                ctrl.wiggleDirection = 0
+        except Exception:
+            logger.debug("stop_all_wiggle on ctrl failed", exc_info=True)
 
 
 def _release_one(ctrl: Any, *, channels: int) -> int:
@@ -234,12 +315,17 @@ def install_shutdown_release_hooks() -> None:
 
 
 def install_vendor_move_init_patch() -> None:
-    """Patch vendor ``ServoCtrl.moveInit`` before webServer imports it.
+    """Patch vendor ``ServoCtrl.moveInit`` + ``singleServo`` before webServer imports.
 
     Stock ``moveInit()`` drives every channel to mid (90°). On this tank that
     jams the shoulder forward. We force shoulder init to ``ANX_ARM_REST_DEG``
     (default 0° = 90° opposite from stock mid) then immediately drop PWM so
     the pose is not held against a stop.
+
+    Stock ``singleServo`` starts a per-instance wiggle thread; with several
+    ServoCtrl objects sharing one PCA9685, a leftover wiggle keeps driving the
+    shoulder down past the stop. Redirect arm channel wiggling through the
+    overlay absolute/nudge path and pause every ctrl first.
     """
     global _move_init_patched
     if _move_init_patched:
@@ -247,7 +333,7 @@ def install_vendor_move_init_patch() -> None:
     try:
         import RPIservo
     except Exception as exc:
-        logger.warning("cannot patch RPIservo.moveInit (%s)", exc)
+        logger.warning("cannot patch RPIservo (%s)", exc)
         return
 
     rest = arm_rest_deg()
@@ -260,7 +346,10 @@ def install_vendor_move_init_patch() -> None:
 
     if not hasattr(RPIservo, "ServoCtrl"):
         return
-    orig = RPIservo.ServoCtrl.moveInit
+    orig_move_init = RPIservo.ServoCtrl.moveInit
+    orig_single = getattr(RPIservo.ServoCtrl, "singleServo", None)
+    orig_set_pwm = getattr(RPIservo.ServoCtrl, "setPWM", None)
+    orig_set_angle = getattr(RPIservo.ServoCtrl, "set_angle", None)
 
     def move_init_safe(self, *args, **kwargs):
         try:
@@ -269,9 +358,10 @@ def install_vendor_move_init_patch() -> None:
         except Exception:
             logger.debug("initPos rewrite failed", exc_info=True)
         try:
-            orig(self, *args, **kwargs)
+            orig_move_init(self, *args, **kwargs)
         finally:
             register_servo_ctrl(self)
+            apply_shoulder_endstops(self)
             # Never leave holding torque after vendor init.
             release_servos(self)
             logger.info(
@@ -279,9 +369,61 @@ def install_vendor_move_init_patch() -> None:
                 arm_rest_deg(),
             )
 
+    def single_servo_safe(self, ID, direcInput, speedSet):
+        register_servo_ctrl(self)
+        stop_all_wiggle()
+        try:
+            from .servo_positions import nudge_servo_from_vendor
+
+            if nudge_servo_from_vendor(int(ID), int(direcInput)):
+                return
+        except Exception:
+            logger.debug("overlay nudge from singleServo failed", exc_info=True)
+        # Non-arm channels / fallback: still avoid multi-ctrl fights.
+        if orig_single is not None:
+            stop_all_wiggle()
+            return orig_single(self, ID, direcInput, speedSet)
+
+    def set_pwm_safe(self, ID, PWM_input):
+        register_servo_ctrl(self)
+        pwm = int(PWM_input)
+        if int(ID) == ARM_CHANNEL:
+            try:
+                from .servo_limits import servo_limit
+
+                pwm = servo_limit(ARM_CHANNEL).clamp(pwm)
+            except Exception:
+                pwm = max(0, min(35, pwm))
+            apply_shoulder_endstops(self)
+        if orig_set_pwm is not None:
+            orig_set_pwm(self, ID, pwm)
+        sync_channel_soft_state(int(ID), pwm)
+
+    def set_angle_safe(self, ID, angle_input):
+        register_servo_ctrl(self)
+        angle = int(round(float(angle_input)))
+        if int(ID) == ARM_CHANNEL:
+            try:
+                from .servo_limits import servo_limit
+
+                angle = servo_limit(ARM_CHANNEL).clamp(angle)
+            except Exception:
+                angle = max(0, min(35, angle))
+            apply_shoulder_endstops(self)
+        if orig_set_angle is not None:
+            orig_set_angle(self, ID, angle)
+        sync_channel_soft_state(int(ID), angle)
+
     RPIservo.ServoCtrl.moveInit = move_init_safe  # type: ignore[method-assign]
+    if orig_single is not None:
+        RPIservo.ServoCtrl.singleServo = single_servo_safe  # type: ignore[method-assign]
+    if orig_set_pwm is not None:
+        RPIservo.ServoCtrl.setPWM = set_pwm_safe  # type: ignore[method-assign]
+    if orig_set_angle is not None:
+        RPIservo.ServoCtrl.set_angle = set_angle_safe  # type: ignore[method-assign]
     _move_init_patched = True
     logger.info(
-        "patched RPIservo.ServoCtrl.moveInit (shoulder rest=%s°, then limp)",
+        "patched RPIservo.ServoCtrl.moveInit + singleServo + setPWM/set_angle "
+        "(shoulder rest=%s°, max clamped)",
         rest,
     )

@@ -725,6 +725,7 @@ def test_servo_slew_step_toward_rate_and_reverse():
 
 def test_shoulder_pwm_native_and_slew_goal(monkeypatch):
     from anx_bridge import servo_positions as sp
+    from anx_bridge import servos as sv
     from anx_bridge.servo_limits import servo_limit
 
     monkeypatch.setenv("ANX_SERVO_SLEW", "true")
@@ -733,26 +734,51 @@ def test_shoulder_pwm_native_and_slew_goal(monkeypatch):
         def __init__(self):
             self.nowPos = [0, 90, 90, 90, 90]
             self.initPos = list(self.nowPos)
+            self.minPos = [0] * 8
+            self.maxPos = [180] * 8
+            self.goalPos = list(self.nowPos)
+            self.lastPos = list(self.nowPos)
+            self.bufferPos = [float(x) for x in self.nowPos]
             self.writes = []
+            self.scMode = "auto"
+            self.wiggleDirection = 0
+            self.paused = 0
 
         def setPWM(self, channel, deg):
             self.nowPos[channel] = int(deg)
             self.writes.append((channel, int(deg)))
 
+        def stopWiggle(self):
+            self.paused += 1
+            self.scMode = "certain"
+
+        def pause(self):
+            self.paused += 1
+
+    sv._all_ctrls.clear()
+    sv._primary_ctrl = None
     sp._ctrl = None
     sp._goals_ui.clear()
     sp._actual_ui.clear()
     sp._apply_wired = False
 
     fake = _Fake()
+    other = _Fake()
+    other.nowPos[0] = 90
+    other.scMode = "wiggle"
+    other.wiggleDirection = 1
     sp.bind_servo_ctrl(fake)
+    sv.register_servo_ctrl(other)
     lim = servo_limit(0)
     assert not lim.invert
     assert lim.rest_deg == 0
+    assert lim.max_deg == 35
     assert lim.ui_to_pwm(0) == 0
-    assert lim.ui_to_pwm(50) == 50
+    assert lim.ui_to_pwm(35) == 35
     # Stock mid 90° outside window → clamp to max, do not invert to "down".
-    assert lim.pwm_to_ui(90) == 50
+    assert lim.pwm_to_ui(90) == 35
+    assert fake.maxPos[0] == 35
+    assert other.maxPos[0] == 35
 
     goal = sp.set_servo_angle(0, 20)
     assert goal == 20
@@ -762,8 +788,35 @@ def test_shoulder_pwm_native_and_slew_goal(monkeypatch):
     assert fake.writes, "expected slew PWM write"
     assert fake.writes[-1][0] == 0
     assert 0 < fake.writes[-1][1] <= 20
+    # Sibling ctrl soft-state mirrors the write so leftover wiggle cannot chase 180°.
+    assert other.nowPos[0] == fake.writes[-1][1]
+    assert other.goalPos[0] == fake.writes[-1][1]
+    assert other.paused >= 1
 
+    before = sp._goals_ui[0]
     assert sp.hold_servo_action("armUp")
-    assert sp._goals_ui[0] == 0  # upright
+    assert sp._goals_ui[0] < before  # nudge toward upright 0
+    mid = sp._goals_ui[0]
     assert sp.hold_servo_action("armDown")
-    assert sp._goals_ui[0] == lim.max_deg
+    assert sp._goals_ui[0] > mid
+    # Hard clamp — slider/hold cannot command past mechanical stall.
+    assert sp.set_servo_angle(0, 90, immediate=True) == 35
+
+
+def test_power_history_series_uses_epoch_ms(monkeypatch):
+    import time
+
+    from anx_bridge import power_sense as ps
+
+    monkeypatch.setenv("ANX_BATTERY_ESR_OHM", "0.15")
+    with ps._lock:
+        ps._history.clear()
+        now = time.time()
+        ps._history.append((now - 0.5, 0.25))
+        ps._history.append((now - 0.1, 0.40))
+    series = ps.history_series()
+    assert len(series) >= 2
+    assert all("a" in p and isinstance(p["t"], int) for p in series)
+    assert series[-1]["t"] > 1_000_000_000_000
+    assert series[0]["t"] <= series[-1]["t"]
+    assert abs(series[-1]["a"] - 0.40) < 1e-6

@@ -7,7 +7,12 @@ from typing import Any, Dict, List, Optional
 
 from .servo_limits import all_limits, servo_limit
 from .servo_slew import get_slew, slew_enabled
-from .servos import ensure_servos_armed, register_servo_ctrl
+from .servos import (
+    ensure_servos_armed,
+    register_servo_ctrl,
+    stop_all_wiggle,
+    sync_channel_soft_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +21,9 @@ _ctrl: Any = None
 _goals_ui: Dict[int, int] = {}  # commanded logical angle (slider / hold target)
 _actual_ui: Dict[int, int] = {}  # last applied logical angle from slewer
 _apply_wired = False
+
+# Shoulder hold nudge (° per button repeat). Vendor wiggle is patched away.
+_SHOULDER_STEP = 5
 
 # Hold-to-move → (channel, toward_high_ui). Shoulder is special-cased in
 # hold_servo_action (armUp → rest/upright PWM 0, armDown → capped forward).
@@ -61,10 +69,12 @@ def _apply_pwm_from_slew(channel: int, pwm: float) -> None:
         if sc is None:
             return
         try:
+            stop_all_wiggle()
             if hasattr(sc, "setPWM"):
                 sc.setPWM(channel, pwm_i)
             elif hasattr(sc, "set_angle"):
                 sc.set_angle(channel, pwm_i)
+            sync_channel_soft_state(channel, pwm_i)
         except Exception:
             logger.debug("slew apply setPWM ch%s failed", channel, exc_info=True)
 
@@ -157,6 +167,7 @@ def set_servo_angle(
             raise RuntimeError("no servo controller bound")
         bind_servo_ctrl(sc)
         ensure_servos_armed(sc, park_arm=False)
+        stop_all_wiggle()
         _goals_ui[channel] = ui
         use_slew = slew_enabled() and not immediate
         if not use_slew:
@@ -166,6 +177,7 @@ def set_servo_angle(
                 sc.set_angle(channel, pwm)
             else:
                 raise RuntimeError("servo ctrl cannot set angle")
+            sync_channel_soft_state(channel, pwm)
             _actual_ui[channel] = ui
             get_slew().sync_pos(channel, float(pwm))
         else:
@@ -185,13 +197,27 @@ def set_servo_angle(
         return ui
 
 
+def _shoulder_current_ui() -> int:
+    with _lock:
+        if 0 in _actual_ui:
+            return int(_actual_ui[0])
+        if 0 in _goals_ui:
+            return int(_goals_ui[0])
+    return int(servo_limit(0).rest_deg)
+
+
 def hold_servo_action(action: str) -> bool:
-    """Map armUp/armDown/… to a slew goal at an endstop."""
-    if action in ("armUp", "armDown"):
-        lim = servo_limit(0)
-        # Upright rest is PWM 0; fold only as far as max_deg (below stall).
-        target = lim.rest_deg if action == "armUp" else lim.endstop_away_from_rest()
-        set_servo_angle(0, target)
+    """Map armUp/armDown/… to a slew goal.
+
+    Shoulder uses small nudges (not endstop slams). PWM 0 = upright; higher =
+    forward. Vendor ``singleServo(0, +1)`` increases PWM (= fold) — ArmUp label
+    must decrease PWM toward 0.
+    """
+    if action == "armUp":
+        set_servo_angle(0, _shoulder_current_ui() - _SHOULDER_STEP)
+        return True
+    if action == "armDown":
+        set_servo_angle(0, _shoulder_current_ui() + _SHOULDER_STEP)
         return True
     spec = _HOLD_HIGH.get(action)
     if spec is None:
@@ -203,11 +229,25 @@ def hold_servo_action(action: str) -> bool:
     return True
 
 
+def nudge_servo_from_vendor(channel: int, direc_input: int) -> bool:
+    """Handle patched ``singleServo`` — shoulder only; invert vendor ± vs label."""
+    if int(channel) != 0:
+        return False
+    # Vendor armUp uses direc=+1 (increase PWM). On this horn that folds down.
+    # Treat +1 as fold (armDown) and -1 as raise (armUp).
+    if int(direc_input) >= 0:
+        set_servo_angle(0, _shoulder_current_ui() + _SHOULDER_STEP)
+    else:
+        set_servo_angle(0, _shoulder_current_ui() - _SHOULDER_STEP)
+    return True
+
+
 def freeze_servo_action(action: str) -> bool:
     """armStop / handStop / … — freeze slewed channel(s) at current pos."""
     channels = _STOP_CHANNELS.get(action)
     if channels is None:
         return False
+    stop_all_wiggle()
     slew = get_slew()
     with _lock:
         for ch in channels:
@@ -219,13 +259,6 @@ def freeze_servo_action(action: str) -> bool:
             ui = lim.pwm_to_ui(int(round(pos_pwm)))
             _goals_ui[ch] = ui
             _actual_ui[ch] = ui
-    # Also stop vendor wiggle thread if still running alongside.
-    sc = _ctrl
-    if sc is not None and hasattr(sc, "stopWiggle"):
-        try:
-            sc.stopWiggle()
-        except Exception:
-            pass
     return True
 
 

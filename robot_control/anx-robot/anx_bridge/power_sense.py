@@ -241,13 +241,17 @@ def last_sample() -> Optional[PowerSample]:
 
 
 def history_series(*, window_s: float = _HISTORY_SEC) -> List[dict]:
-    """Points for sparkline: ``[{t, a}, ...]`` (amperes) within the window."""
+    """Points for sparkline: ``[{t, a}, ...]`` (amperes) within the window.
+
+    ``t`` is **absolute epoch milliseconds** (same shape as the latency chart)
+    so the canvas can map the last 7 s without relative/absolute mix-ups.
+    """
     with _lock:
         now = time.time()
         _trim_history_unlocked(now)
         cutoff = now - max(1.0, float(window_s))
         return [
-            {"t": round(ts - now, 3), "a": amps}
+            {"t": int(round(ts * 1000.0)), "a": float(amps)}
             for ts, amps in _history
             if ts >= cutoff
         ]

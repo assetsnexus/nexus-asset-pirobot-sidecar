@@ -60,10 +60,9 @@ class ServoLimit:
         return self.min_deg
 
 
-# Shoulder: UI == PWM. Rest/upright at 0°. Cap max below forward stall (~90°).
-# 50° leaves margin before the mechanical jam that overheats the servo.
+# Shoulder: UI == PWM. Rest/upright at 0°. Cap well below forward stall (~90°).
 RASPTANK_SERVO_LIMITS: Dict[int, ServoLimit] = {
-    0: ServoLimit(0, "Shoulder", 0, 50, 0, invert=False),
+    0: ServoLimit(0, "Shoulder", 0, 35, 0, invert=False),
     1: ServoLimit(1, "Elbow", 15, 165, 90),
     2: ServoLimit(2, "Wrist", 20, 160, 90),
     3: ServoLimit(3, "Gripper", 40, 140, 90),

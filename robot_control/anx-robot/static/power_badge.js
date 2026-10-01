@@ -56,10 +56,10 @@
         "</div>" +
         '<div class="panel" data-kind="battery">' +
         '<div class="head">' +
-        '<span class="title">Battery % · last 7s</span>' +
+        '<span class="title">Current · last 7s</span>' +
         '<span class="meta unknown">—</span>' +
         "</div>" +
-        '<canvas width="320" height="64" aria-label="battery percent last 7 seconds"></canvas>' +
+        '<canvas width="320" height="64" aria-label="battery current last 7 seconds"></canvas>' +
         "</div>";
       root.appendChild(box);
     }
@@ -85,12 +85,34 @@
     return "ok";
   }
 
+  function pointValue(pt, valueKey) {
+    if (!pt || typeof pt !== "object") return NaN;
+    if (valueKey && pt[valueKey] != null) return Number(pt[valueKey]);
+    if (pt.a != null) return Number(pt.a);
+    if (pt.ms != null) return Number(pt.ms);
+    if (pt.pct != null) return Number(pt.pct);
+    return NaN;
+  }
+
+  function pointTimeMs(pt, now) {
+    var t = Number(pt && pt.t);
+    if (!isFinite(t)) return NaN;
+    // Absolute epoch ms (~1e12) or seconds (~1e9); else relative seconds in [-window, 0].
+    if (Math.abs(t) > 1e11) return t;
+    if (Math.abs(t) > 1e8) return t * 1000;
+    if (Math.abs(t) <= WINDOW_S * 2) return now + t * 1000;
+    // Fallback: treat as absolute ms.
+    return t;
+  }
+
   function drawSeries(canvas, series, level, opts) {
     var ctx = canvas.getContext("2d");
     if (!ctx) return;
     var dpr = window.devicePixelRatio || 1;
     var cssW = canvas.clientWidth || 320;
     var cssH = canvas.clientHeight || 64;
+    if (cssW < 8) cssW = 320;
+    if (cssH < 8) cssH = 64;
     if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
       canvas.width = Math.round(cssW * dpr);
       canvas.height = Math.round(cssH * dpr);
@@ -119,15 +141,29 @@
       return;
     }
 
-    // Auto-scale latency: pad around observed max, keep floor at opts.yMin.
+    var now = opts.now != null ? opts.now : Date.now();
+    var pts = [];
+    series.forEach(function (pt) {
+      var v = pointValue(pt, valueKey);
+      var tMs = pointTimeMs(pt, now);
+      if (!isFinite(v) || !isFinite(tMs)) return;
+      pts.push({ t: tMs, v: v });
+    });
+    if (!pts.length) {
+      ctx.fillStyle = "rgba(255,255,255,.35)";
+      ctx.font = "11px system-ui,sans-serif";
+      ctx.fillText("waiting for samples…", 8, cssH / 2 + 4);
+      return;
+    }
+
+    // Auto-scale: pad around observed max, keep floor at opts.yMin / floorMax.
     if (opts.autoScale) {
       var hi = yMin;
-      series.forEach(function (pt) {
-        var v = Number(pt[valueKey]);
-        if (isFinite(v) && v > hi) hi = v;
+      pts.forEach(function (pt) {
+        if (pt.v > hi) hi = pt.v;
       });
-      yMax = Math.max(yMin + 1, Math.ceil(hi * 1.2));
-      if (yMax < opts.floorMax) yMax = opts.floorMax;
+      yMax = Math.max(yMin + 0.25, hi * 1.25);
+      if (opts.floorMax != null && yMax < opts.floorMax) yMax = opts.floorMax;
     }
 
     var stroke =
@@ -139,13 +175,8 @@
           ? "rgba(244,208,63,.2)"
           : "rgba(125,206,160,.2)";
 
-    var now = opts.now != null ? opts.now : Date.now();
-    function xAt(tAbs) {
-      // absolute ms timestamps → map last WINDOW_S onto width
-      var tRel = (tAbs - now) / 1000;
-      return ((tRel + WINDOW_S) / WINDOW_S) * cssW;
-    }
-    function xAtRel(tRel) {
+    function xAt(tAbsMs) {
+      var tRel = (tAbsMs - now) / 1000;
       return ((tRel + WINDOW_S) / WINDOW_S) * cssW;
     }
     function yAt(v) {
@@ -155,27 +186,31 @@
       return cssH - 2 - p * (cssH - 4);
     }
 
-    var useAbs = opts.absTime === true;
     ctx.beginPath();
-    series.forEach(function (pt, i) {
-      var x = useAbs ? xAt(pt.t) : xAtRel(pt.t);
-      var y = yAt(pt[valueKey]);
+    pts.forEach(function (pt, i) {
+      var x = xAt(pt.t);
+      var y = yAt(pt.v);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
-    var last = series[series.length - 1];
-    var first = series[0];
+    var last = pts[pts.length - 1];
+    var first = pts[0];
     ctx.strokeStyle = stroke;
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    var xLast = useAbs ? xAt(last.t) : xAtRel(last.t);
-    var xFirst = useAbs ? xAt(first.t) : xAtRel(first.t);
-    ctx.lineTo(xLast, cssH);
-    ctx.lineTo(xFirst, cssH);
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(xAt(last.t), yAt(last.v), 3, 0, Math.PI * 2);
+      ctx.fillStyle = stroke;
+      ctx.fill();
+    } else {
+      ctx.lineTo(xAt(last.t), cssH);
+      ctx.lineTo(xAt(first.t), cssH);
+      ctx.closePath();
+      ctx.fillStyle = fill;
+      ctx.fill();
+    }
   }
 
   function panelEls(kind) {
@@ -232,27 +267,48 @@
     if (!body || !body.available) {
       els.meta.className = "meta unknown";
       els.meta.textContent = "n/a";
-      drawSeries(els.canvas, [], "unknown", {
+          drawSeries(els.canvas, [], "unknown", {
         yMin: 0,
-        yMax: 100,
-        valueKey: "pct",
-        absTime: false,
+        yMax: 3,
+        valueKey: "a",
+        now: Date.now(),
+        autoScale: true,
+        floorMax: 0.5,
       });
       return;
     }
 
+    // Backend series is [{t_ms, a}, ...] (estimated amps). Also accept legacy {pct}/relative t.
+    var series = body.series || [];
+    var valueKey = "a";
+    if (series.length && series[0].a == null && series[0].pct != null) {
+      valueKey = "pct";
+    }
+
+    var amps = body.current_a_est;
     var level =
+      body.level_current ||
       body.level ||
-      levelForPct(body.percent, body.warn_pct || 30, body.crit_pct || 15);
+      (amps == null
+        ? "unknown"
+        : amps >= (body.crit_a || 3)
+          ? "crit"
+          : amps >= (body.warn_a || 1.5)
+            ? "warn"
+            : "ok");
     els.meta.className = "meta " + level;
     els.meta.textContent =
-      (body.percent != null ? Number(body.percent).toFixed(0) + "%" : "—") +
-      (body.volts != null ? " · " + Number(body.volts).toFixed(2) + " V" : "");
-    drawSeries(els.canvas, body.series || [], level, {
+      (amps != null ? Number(amps).toFixed(2) + " A" : "—") +
+      (body.volts != null ? " · " + Number(body.volts).toFixed(2) + " V" : "") +
+      (body.percent != null ? " · " + Number(body.percent).toFixed(0) + "%" : "");
+
+    drawSeries(els.canvas, series, level, {
       yMin: 0,
-      yMax: 100,
-      valueKey: "pct",
-      absTime: false,
+      yMax: valueKey === "pct" ? 100 : 3,
+      valueKey: valueKey,
+      now: Date.now(),
+      autoScale: valueKey === "a",
+      floorMax: valueKey === "a" ? 0.5 : 0,
     });
   }
 

@@ -40,45 +40,45 @@ set_key() {
   fi
 }
 
-# Join the edge stack. Do not copy the host MQTT URL (127.0.0.1) into this container.
+# Host network: HTTPS/WSS bind on the Pi LAN/VPN interfaces (Docker port-proxy
+# drops TLS ClientHello to <lan-ip>:5000). MQTT uses ipc's published host port.
+MQTT_TLS_PORT="${MQTT_TLS_PORT:-28883}"
 set_key IPC_MQTT_CERTS_DIR "$IPC_MQTT_CERTS_DIR"
 set_key ANX_BRIDGE_ENABLED true
-set_key MQTT_BROKER "mqtts://mqtt:8883"
+set_key MQTT_BROKER "mqtts://127.0.0.1:${MQTT_TLS_PORT}"
 set_key MQTT_USER anx
 set_key MQTT_CA_FILE "/certs/ca.crt"
-set_key IPC_DOCKER_NETWORK anx-assets-ipc-network
 set_key ANX_TOPIC_PREFIX rasptank
 # Upright shoulder rest (stock mid 90° holds arm forward and overheats the servo).
 set_key ANX_ARM_REST_DEG 180
 
 # Self-signed TLS for https://:5000 and wss://:8888 (stock UI requires wss on HTTPS pages).
+# Always refresh so SAN includes current LAN/VPN addresses (browsers + curl -sk).
 TLS_DIR="${ROBOT_TLS_DIR:-$ROOT/data/certs}"
 mkdir -p "$TLS_DIR"
-if [[ ! -f "$TLS_DIR/robot.key" || ! -f "$TLS_DIR/robot.crt" ]]; then
-  if ! command -v openssl >/dev/null 2>&1; then
-    echo "ERROR: openssl is required to generate the robot UI TLS certificate" >&2
-    exit 1
-  fi
-  HOSTNAME_FQDN="$(hostname -f 2>/dev/null || hostname || echo localhost)"
-  HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo localhost)"
-  # Include common LAN addresses so browsers accept the cert for the Pi IP.
-  SAN="DNS:localhost,DNS:${HOSTNAME_SHORT},DNS:${HOSTNAME_FQDN},IP:127.0.0.1"
-  while read -r ip; do
-    [[ -n "$ip" ]] || continue
-    SAN="${SAN},IP:${ip}"
-  done < <(hostname -I 2>/dev/null | tr ' ' '\n' | head -8)
-  echo "Generating self-signed TLS cert (${TLS_DIR}/robot.crt) SAN=${SAN}"
-  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 825 \
-    -keyout "$TLS_DIR/robot.key" \
-    -out "$TLS_DIR/robot.crt" \
-    -subj "/CN=${HOSTNAME_SHORT}/O=ANX Robot Sidecar" \
-    -addext "subjectAltName=${SAN}"
-  chmod 640 "$TLS_DIR/robot.key" "$TLS_DIR/robot.crt" || true
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "ERROR: openssl is required to generate the robot UI TLS certificate" >&2
+  exit 1
 fi
+HOSTNAME_FQDN="$(hostname -f 2>/dev/null || hostname || echo localhost)"
+HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo localhost)"
+SAN="DNS:localhost,DNS:${HOSTNAME_SHORT},DNS:${HOSTNAME_FQDN},IP:127.0.0.1"
+while read -r ip; do
+  [[ -n "$ip" ]] || continue
+  SAN="${SAN},IP:${ip}"
+done < <(hostname -I 2>/dev/null | tr ' ' '\n' | head -8)
+echo "Generating self-signed TLS cert (${TLS_DIR}/robot.crt) SAN=${SAN}"
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 825 \
+  -keyout "$TLS_DIR/robot.key" \
+  -out "$TLS_DIR/robot.crt" \
+  -subj "/CN=${HOSTNAME_SHORT}/O=ANX Robot Sidecar" \
+  -addext "subjectAltName=${SAN}"
+chmod 640 "$TLS_DIR/robot.key" "$TLS_DIR/robot.crt" || true
 set_key ANX_ROBOT_TLS true
 set_key ANX_ROBOT_TLS_CERT /certs/tls/robot.crt
 set_key ANX_ROBOT_TLS_KEY /certs/tls/robot.key
 set_key ROBOT_TLS_DIR "$TLS_DIR"
+set_key MQTT_TLS_PORT "$MQTT_TLS_PORT"
 
 # lgpio opens /dev/gpiochip*. The PCA9685 motors use /dev/i2c-*.
 # Picamera2/libcamera need /dev/video* /dev/media* /dev/dma_heap* (and /run/udev
@@ -130,17 +130,29 @@ docker exec anx-robot-sidecar python -c 'from picamera2 import Picamera2; print(
 
 PORT="$(grep -E '^ROBOT_HTTP_PORT=' .env | head -1 | cut -d= -f2- || true)"
 PORT="${PORT:-5000}"
+LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
-echo "Robot sidecar is up (image built locally, no registry)."
-echo "Health: curl -sk https://127.0.0.1:${PORT}/health"
+echo "Robot sidecar is up (host network — HTTPS reachable on LAN/VPN IPs)."
+echo "Health (local): curl -sk https://127.0.0.1:${PORT}/health"
+if [[ -n "$LAN_IP" ]]; then
+  echo "Health (LAN):   curl -sk https://${LAN_IP}:${PORT}/health"
+fi
 echo "UI: https://<pi-ip>:${PORT}/  Control WSS: wss://<pi-ip>:8888  (login admin:123456)"
 echo "Browser will warn on the self-signed cert from data/certs/robot.crt — that is expected."
-echo "Use https:// only (not http://) so the UI and WSS are not mixed-content blocked."
+echo "Use https:// only (not http://). Always pass curl -sk for the self-signed cert."
+sleep 2
 if curl -sk --connect-timeout 3 "https://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-  echo "HTTPS health OK."
+  echo "HTTPS health OK on 127.0.0.1"
   curl -sk "https://127.0.0.1:${PORT}/health" || true
   echo
 else
   echo "WARNING: https://127.0.0.1:${PORT}/health not reachable yet — check: docker logs anx-robot-sidecar"
+fi
+if [[ -n "$LAN_IP" ]]; then
+  if curl -sk --connect-timeout 3 "https://${LAN_IP}:${PORT}/health" >/dev/null 2>&1; then
+    echo "HTTPS health OK on ${LAN_IP} (LAN/VPN)"
+  else
+    echo "WARNING: https://${LAN_IP}:${PORT}/health failed from this host — check firewall / VPN routing"
+  fi
 fi
 echo "Pair the edge node with any one method: manual ZIP, USB, Bluetooth, or pairing link."

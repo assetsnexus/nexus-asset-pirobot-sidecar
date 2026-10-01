@@ -30,5 +30,7 @@ def ssl_server_context() -> ssl.SSLContext | None:
         _log.warning("ANX_ROBOT_TLS is on but cert/key missing (%s / %s)", cert, key)
         return None
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.verify_mode = ssl.CERT_NONE
     ctx.load_cert_chain(str(cert), str(key))
     return ctx

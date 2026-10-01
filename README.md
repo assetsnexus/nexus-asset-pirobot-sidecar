@@ -65,7 +65,8 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 
 | Variable | Role |
 |----------|------|
-| `MQTT_BROKER` | Default `mqtts://mqtt:8883` on the compose network |
+| `MQTT_BROKER` | Default `mqtts://127.0.0.1:28883` (host network → ipc-published Mosquitto TLS port) |
+| `MQTT_TLS_PORT` | Host port ipc publishes for Mosquitto TLS (default `28883`) |
 | `MQTT_USER` / `MQTT_PASSWORD` | Same as ipc `prepare.sh` Mosquitto user `anx` |
 | `MQTT_CA_FILE` | `/certs/ca.crt` (bind from ipc `data/mqtt/certs/ca.crt`) |
 | `ANX_BRIDGE_ENABLED` | `true` to start the overlay MQTT bridge |
@@ -78,7 +79,9 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_NODE_HEARTBEAT_MS` | Node-heartbeat freshness window (default 2000); node owns session timers while fresh |
 | `ANX_OBSTACLE_STOP_MM` | Local ultrasonic stop threshold during timed motion (default 100) |
 | `ANX_WHEEL_DIAMETER_M` / `ANX_TRACK_WIDTH_M` / `ANX_SPEED_AT_FULL_PWM_MPS` | Open-loop odometry defaults `0.045` / `0.12` / `0.35` |
-| `IPC_DOCKER_NETWORK` | Must match ipc compose network name |
+| `IPC_DOCKER_NETWORK` | Unused with host networking (kept for older checkouts) |
+
+The sidecar uses Docker **`network_mode: host`** so `https://<pi-lan-ip>:5000` works over LAN/VPN. Docker’s published-port proxy accepts TCP to the LAN IP but often never answers the TLS ClientHello (hang until timeout). Self-signed cert: always `curl -sk https://…`.
 
 ## Healthcheck
 

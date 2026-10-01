@@ -508,21 +508,25 @@ def test_bridge_disabled_is_noop():
 def test_arm_rest_deg_clamped(monkeypatch):
     from anx_bridge.servos import arm_rest_deg, park_arm_upright
 
-    monkeypatch.setenv("ANX_ARM_REST_DEG", "90")
-    assert arm_rest_deg() == 90
+    monkeypatch.delenv("ANX_ARM_REST_DEG", raising=False)
+    assert arm_rest_deg() == 0
     monkeypatch.setenv("ANX_ARM_REST_DEG", "200")
     assert arm_rest_deg() == 180
 
     class _Fake:
         def __init__(self):
+            self.initPos = [90, 90, 90, 90, 90]
+            self.nowPos = [90, 90, 90, 90, 90]
             self.calls = []
 
-        def initConfig(self, channel, deg, move_to):
-            self.calls.append((channel, deg, move_to))
+        def setPWM(self, channel, deg):
+            self.nowPos[channel] = deg
+            self.calls.append((channel, deg))
 
     fake = _Fake()
-    park_arm_upright(fake, deg=90)
-    assert fake.calls == [(0, 90, 1)]
+    park_arm_upright(fake, deg=0)
+    assert fake.calls == [(0, 0)]
+    assert fake.initPos[0] == 0
 
 
 def test_idle_police_turns_on_after_quiet():

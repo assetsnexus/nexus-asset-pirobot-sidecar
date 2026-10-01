@@ -6,6 +6,8 @@ flask>=2.0
 flask-cors>=3.0
 # Adeept webServer.py control plane (UI uses ws://host:8888). Pin matches vendor setup.py.
 websockets==13.0
+# Vendor info.py (imported by webServer.py) requires psutil for /health-adjacent telemetry.
+psutil>=5.9
 paho-mqtt>=2
 evdev
 imutils
@@ -15,3 +17,6 @@ adafruit-circuitpython-motor
 adafruit-circuitpython-ads7830
 gpiozero
 lgpio
+# Vendor robotLight.RobotWS2812 (Pi ≤4 PWM path). HAT V3.1 prefers SPI (spidev).
+rpi_ws281x>=5.0
+spidev>=3.5

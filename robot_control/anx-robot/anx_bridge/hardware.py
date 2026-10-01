@@ -237,7 +237,7 @@ class HardwareExecutor:
                 if hasattr(ws, "breath"):
                     ws.breath(70, 70, 255)
         except Exception as exc:
-            logger.debug("WS2812 unavailable: %s", exc)
+            logger.warning("WS2812 unavailable: %s", exc)
             self._ws2812_ready = False
 
     def _ensure_motion(self) -> MotionController:

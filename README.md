@@ -72,6 +72,7 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_CONTROL_SOURCE` | `auto` \| `usb` \| `mqtt` |
 | `ANX_TOPIC_PREFIX` | Default `rasptank` (blueprint topic prefix) |
 | `ANX_DEADMAN_MS` | Quiet-MQTT failsafe (default 500); gated during timed motion; suppressed while node heartbeats are fresh |
+| `ANX_ARM_REST_DEG` | Shoulder (ch0) upright park on start (default `0`). Stock `90` is mid/forward and stalls the servo. Try `180` if the arm moves the wrong way. |
 | `ANX_IDLE_POLICE` | `true` (default): blink WS2812 police lights while idle (no remote/UI control). The Robot HAT has no sleep/power-save mode in vendor firmware — battery ADC only. |
 | `ANX_IDLE_POLICE_MS` | Quiet time before idle police (default 3000). Explicit `police` / `police_off` override until the next auto cycle. |
 | `ANX_NODE_HEARTBEAT_MS` | Node-heartbeat freshness window (default 2000); node owns session timers while fresh |

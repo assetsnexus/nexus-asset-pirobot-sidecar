@@ -121,7 +121,7 @@
         '<span class="deg">' + s.deg + "°</span></div>";
     });
     html +=
-      '<div class="hint">Mechanical limits (hardcoded). Drag to move; values clamp to safe range.</div>';
+      '<div class="hint">Shoulder: 0° = upright, higher = forward (capped before stall). Other joints use mechanical limits.</div>';
     body.innerHTML = html;
     body.querySelectorAll("input[type=range]").forEach(function (input) {
       input.addEventListener("input", onSlide);

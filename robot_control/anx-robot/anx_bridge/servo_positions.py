@@ -17,12 +17,10 @@ _goals_ui: Dict[int, int] = {}  # commanded logical angle (slider / hold target)
 _actual_ui: Dict[int, int] = {}  # last applied logical angle from slewer
 _apply_wired = False
 
-# Hold-to-move: action → (channel, toward_high_ui). Matches vendor ± sense in UI space;
-# inverted joints map high UI to low PWM (shoulder upright).
+# Hold-to-move → (channel, toward_high_ui). Shoulder is special-cased in
+# hold_servo_action (armUp → rest/upright PWM 0, armDown → capped forward).
 _HOLD_HIGH: Dict[str, tuple[int, bool]] = {
-    "armUp": (0, True),
-    "armDown": (0, False),
-    "handUp": (1, False),
+    "handUp": (1, False),  # vendor singleServo(1, -1)
     "handDown": (1, True),
     "lookleft": (2, True),
     "lookright": (2, False),
@@ -188,7 +186,13 @@ def set_servo_angle(
 
 
 def hold_servo_action(action: str) -> bool:
-    """Map armUp/armDown/… to a slew goal at the UI endstop. False if unknown."""
+    """Map armUp/armDown/… to a slew goal at an endstop."""
+    if action in ("armUp", "armDown"):
+        lim = servo_limit(0)
+        # Upright rest is PWM 0; fold only as far as max_deg (below stall).
+        target = lim.rest_deg if action == "armUp" else lim.endstop_away_from_rest()
+        set_servo_angle(0, target)
+        return True
     spec = _HOLD_HIGH.get(action)
     if spec is None:
         return False

@@ -1,12 +1,13 @@
 """Hardcoded RaspTank joint limits (PCA9685 channels 0–4).
 
 Stock Adeept range is 0–180° electrically. On this robot mechanical stops are
-tighter — especially the shoulder (ch0): mid (~90°) holds forward and stalls,
-and angles toward 180° drive past the down stop. Keep channel 0 near upright.
+tighter — especially the shoulder (ch0):
 
-Shoulder horn is mounted so PWM increases toward *forward/down*. The slider
-exposes a logical angle with the opposite sense (higher = more upright), so
-``invert=True`` maps UI ↔ PWM as ``pwm = min+max-ui``.
+* PWM **0°** = upright rest (90° opposite stock mid).
+* PWM **↑** = forward / down toward the stall (stock mid ~90° jams).
+
+Slider degrees are **PWM degrees** for the shoulder (no invert). Keep max well
+below the forward stall so the arm cannot be commanded past the stop.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ class ServoLimit:
     name: str
     min_deg: int
     max_deg: int
-    rest_deg: int  # logical (UI) rest; for inverted joints this is upright
+    rest_deg: int  # PWM / slider degrees (same space unless invert)
     invert: bool = False
 
     def clamp(self, deg: int) -> int:
@@ -34,21 +35,35 @@ class ServoLimit:
         return self.min_deg + self.max_deg - ui
 
     def pwm_to_ui(self, pwm_deg: int) -> int:
-        """PCA9685 degrees → logical slider angle."""
-        pwm = self.clamp(int(pwm_deg))
-        if not self.invert:
-            return pwm
-        return self.min_deg + self.max_deg - pwm
+        """PCA9685 degrees → logical slider angle.
+
+        Do **not** clamp PWM into [min,max] before mapping — vendor ``nowPos``
+        may still be stock mid (90°) outside our safe window; clamping first
+        then inverting would flip upright/down incorrectly.
+        """
+        pwm = max(0, min(180, int(pwm_deg)))
+        if self.invert:
+            ui = self.min_deg + self.max_deg - pwm
+        else:
+            ui = pwm
+        return self.clamp(ui)
 
     @property
     def rest_pwm(self) -> int:
         return self.ui_to_pwm(self.rest_deg)
 
+    def endstop_away_from_rest(self) -> int:
+        """Opposite joint limit from rest (for armDown / fold)."""
+        mid = (self.min_deg + self.max_deg) / 2.0
+        if self.rest_deg <= mid:
+            return self.max_deg
+        return self.min_deg
 
-# Shoulder: PWM 0° = upright, PWM↑ = forward/down. Slider is inverted so
-# dragging up/right raises the arm (logical rest = max = upright).
+
+# Shoulder: UI == PWM. Rest/upright at 0°. Cap max below forward stall (~90°).
+# 50° leaves margin before the mechanical jam that overheats the servo.
 RASPTANK_SERVO_LIMITS: Dict[int, ServoLimit] = {
-    0: ServoLimit(0, "Shoulder", 0, 85, 85, invert=True),
+    0: ServoLimit(0, "Shoulder", 0, 50, 0, invert=False),
     1: ServoLimit(1, "Elbow", 15, 165, 90),
     2: ServoLimit(2, "Wrist", 20, 160, 90),
     3: ServoLimit(3, "Gripper", 40, 140, 90),

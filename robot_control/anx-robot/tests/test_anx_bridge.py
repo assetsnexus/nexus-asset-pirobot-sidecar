@@ -723,7 +723,7 @@ def test_servo_slew_step_toward_rate_and_reverse():
     assert abs(ctrl.position(0) - mid) < 20.0
 
 
-def test_shoulder_invert_and_slew_goal(monkeypatch):
+def test_shoulder_pwm_native_and_slew_goal(monkeypatch):
     from anx_bridge import servo_positions as sp
     from anx_bridge.servo_limits import servo_limit
 
@@ -739,7 +739,6 @@ def test_shoulder_invert_and_slew_goal(monkeypatch):
             self.nowPos[channel] = int(deg)
             self.writes.append((channel, int(deg)))
 
-    # Reset module state between tests.
     sp._ctrl = None
     sp._goals_ui.clear()
     sp._actual_ui.clear()
@@ -748,15 +747,23 @@ def test_shoulder_invert_and_slew_goal(monkeypatch):
     fake = _Fake()
     sp.bind_servo_ctrl(fake)
     lim = servo_limit(0)
-    assert lim.invert
-    # UI 85 (upright) → PWM 0
-    assert lim.ui_to_pwm(85) == 0
-    goal = sp.set_servo_angle(0, 0)  # UI low = forward = PWM 85
-    assert goal == 0
-    # Goal recorded; PWM arrives via slewer ticks.
+    assert not lim.invert
+    assert lim.rest_deg == 0
+    assert lim.ui_to_pwm(0) == 0
+    assert lim.ui_to_pwm(50) == 50
+    # Stock mid 90° outside window → clamp to max, do not invert to "down".
+    assert lim.pwm_to_ui(90) == 50
+
+    goal = sp.set_servo_angle(0, 20)
+    assert goal == 20
     from anx_bridge.servo_slew import get_slew
 
     get_slew().tick(dt=0.2)
     assert fake.writes, "expected slew PWM write"
     assert fake.writes[-1][0] == 0
-    assert fake.writes[-1][1] > 0  # moving toward PWM 85
+    assert 0 < fake.writes[-1][1] <= 20
+
+    assert sp.hold_servo_action("armUp")
+    assert sp._goals_ui[0] == 0  # upright
+    assert sp.hold_servo_action("armDown")
+    assert sp._goals_ui[0] == lim.max_deg

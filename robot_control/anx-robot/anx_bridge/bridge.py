@@ -32,6 +32,7 @@ _session: Optional[PahoSession] = None
 _deadman: Optional[Deadman] = None
 _status_lights: Optional[StatusLightsController] = None
 _executor_ref: Optional[HardwareExecutor] = None
+_router: Optional[CommandRouter] = None
 
 # Compat alias for older call sites.
 _idle_police = None
@@ -67,6 +68,11 @@ def set_control_socket_clients(count: int) -> None:
         _status_lights.set_ws_connected(connected)
     if not connected:
         release_servos()
+        if _router is not None:
+            try:
+                _router.all_stop()
+            except Exception:
+                logger.warning("drive stop on control disconnect failed", exc_info=True)
 
 
 def release_line_sensors_for_vendor() -> None:
@@ -92,7 +98,7 @@ def start_bridge(
     executor: Optional[Callable] = None,
     sample: Optional[SampleFn] = None,
 ) -> None:
-    global _thread, _session, _deadman, _status_lights, _idle_police, _executor_ref
+    global _thread, _session, _deadman, _status_lights, _idle_police, _executor_ref, _router
     cfg = config or BridgeConfig.from_env()
     if not cfg.enabled:
         logger.info("ANX bridge disabled (ANX_BRIDGE_ENABLED)")
@@ -111,6 +117,7 @@ def start_bridge(
             sample = build_sample_fn(executor)
 
     router = CommandRouter(executor)
+    _router = router
     deadman = Deadman(
         router,
         cfg.deadman_ms,

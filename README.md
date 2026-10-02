@@ -77,7 +77,10 @@ Optional Edge AI on the same IPC host uses the ipc example only (`./prepare.sh -
 | `ANX_CONTROL_SOURCE` | `auto` \| `usb` \| `mqtt` |
 | `ANX_TOPIC_PREFIX` | Default `rasptank` (blueprint topic prefix) |
 | `ANX_DEADMAN_MS` | Quiet-MQTT failsafe (default 500); gated during timed motion; suppressed while node heartbeats are fresh |
-| `ANX_ARM_REST_DEG` | Shoulder init angle (default `0` = 90° opposite stock mid). Stock `90` stalls forward; `180` past the down stop. Vendor `moveInit` is patched to use this, then PWM is released (no hold). |
+| `ANX_ARM_REST_DEG` | Shoulder rest angle (default `0` = 90° opposite stock mid). Stock `90` stalls forward. Vendor `moveInit` uses this then releases PWM; boot init re-drives rest after a reconnect grace window, then goes limp. |
+| `ANX_BOOT_INIT` | `true` (default): after start, wait → blink → move to rest → limp |
+| `ANX_BOOT_INIT_DELAY_S` | Seconds to wait before boot move (default `3`) so a reconnecting UI can claim the socket and cancel init |
+| `ANX_BOOT_INIT_SETTLE_S` | Seconds to hold rest pose before limp (default `1.2`) |
 | `ANX_SERVO_SLEW` | `true` (default): rate-limit servo goals (sliders + hold buttons). `false` = snap. |
 | `ANX_SERVO_MAX_DEG_S` / `ANX_SERVO_MAX_DEG_S2` | Max angular rate / accel (default `90` °/s, `360` °/s²). Accel `0` = instant velocity toward goal. |
 | `ANX_BATT_V_EMPTY` / `ANX_BATT_V_FULL` | Pack voltage span for SoC % (default `6.0` / `8.4`, 2S). Hard Ware chip + 7s sparkline. |

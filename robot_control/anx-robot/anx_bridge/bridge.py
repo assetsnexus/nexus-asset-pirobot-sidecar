@@ -33,6 +33,7 @@ _deadman: Optional[Deadman] = None
 _status_lights: Optional[StatusLightsController] = None
 _executor_ref: Optional[HardwareExecutor] = None
 _router: Optional[CommandRouter] = None
+_ws_client_count = 0
 
 # Compat alias for older call sites.
 _idle_police = None
@@ -44,6 +45,13 @@ def poke_node_heartbeat() -> None:
     """Public API: asset-node (or tests) mark the control path as alive."""
     if _deadman is not None:
         _deadman.poke_node_heartbeat()
+
+
+def control_socket_connected() -> bool:
+    """True when at least one UI control WebSocket client is connected."""
+    if _status_lights is not None and _status_lights.ws_connected:
+        return True
+    return int(_ws_client_count) > 0
 
 
 def note_ui_control(*, arm_servos: bool = True) -> None:
@@ -60,10 +68,20 @@ def note_ui_control(*, arm_servos: bool = True) -> None:
 def set_control_socket_clients(count: int) -> None:
     """UI control WebSocket client count.
 
-    Connected → blue status only (servos stay limp until a real command).
-    Disconnected → release PWM (limp) + red status.
+    Connected → blue status; cancel boot-init park/limp so reconnect wins.
+    Disconnected → release PWM (limp), stop drive (same ``all_stop`` as the
+    deadman), and red status. Limp servos alone leave the tank rolling.
     """
-    connected = int(count) > 0
+    global _ws_client_count
+    _ws_client_count = max(0, int(count))
+    connected = _ws_client_count > 0
+    if connected:
+        try:
+            from .servo_boot import cancel_boot_init
+
+            cancel_boot_init()
+        except Exception:
+            logger.debug("cancel_boot_init on connect failed", exc_info=True)
     if _status_lights is not None:
         _status_lights.set_ws_connected(connected)
     if not connected:

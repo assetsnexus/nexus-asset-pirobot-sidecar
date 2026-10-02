@@ -2,6 +2,7 @@
 
 from .bridge import (
     adopt_vendor_line_sensors,
+    control_socket_connected,
     note_ui_control,
     poke_node_heartbeat,
     release_line_sensors_for_vendor,
@@ -16,6 +17,7 @@ __all__ = [
     "poke_node_heartbeat",
     "note_ui_control",
     "set_control_socket_clients",
+    "control_socket_connected",
     "release_line_sensors_for_vendor",
     "adopt_vendor_line_sensors",
 ]

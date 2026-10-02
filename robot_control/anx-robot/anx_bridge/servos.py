@@ -317,15 +317,16 @@ def install_shutdown_release_hooks() -> None:
 def install_vendor_move_init_patch() -> None:
     """Patch vendor ``ServoCtrl.moveInit`` + ``singleServo`` before webServer imports.
 
-    Stock ``moveInit()`` drives every channel to mid (90°). On this tank that
-    jams the shoulder forward. We force shoulder init to ``ANX_ARM_REST_DEG``
-    (default 0° = 90° opposite from stock mid) then immediately drop PWM so
-    the pose is not held against a stop.
+    Stock ``moveInit()`` drives every channel to mid (90°) and **holds** PWM.
+    On this tank that jams the shoulder forward and melts the servo. We:
 
-    Stock ``singleServo`` starts a per-instance wiggle thread; with several
-    ServoCtrl objects sharing one PCA9685, a leftover wiggle keeps driving the
-    shoulder down past the stop. Redirect arm channel wiggling through the
-    overlay absolute/nudge path and pause every ctrl first.
+    * rewrite shoulder ``initPos`` / goals to ``ANX_ARM_REST_DEG`` (default 0°)
+    * clamp ch0 software endstops
+    * **skip PCA writes in moveInit** (no hold at import)
+    * redirect ``singleServo`` arm wiggle through overlay nudges
+
+    Physical settle is ``servo_boot``: wait (default 3 s for reconnect) → blink →
+    move to default rest → limp. A control-socket connect cancels that sequence.
     """
     global _move_init_patched
     if _move_init_patched:
@@ -346,28 +347,53 @@ def install_vendor_move_init_patch() -> None:
 
     if not hasattr(RPIservo, "ServoCtrl"):
         return
-    orig_move_init = RPIservo.ServoCtrl.moveInit
+    orig_move_init = RPIservo.ServoCtrl.moveInit  # kept for reference / future fallback
+    _ = orig_move_init
     orig_single = getattr(RPIservo.ServoCtrl, "singleServo", None)
     orig_set_pwm = getattr(RPIservo.ServoCtrl, "setPWM", None)
     orig_set_angle = getattr(RPIservo.ServoCtrl, "set_angle", None)
 
     def move_init_safe(self, *args, **kwargs):
+        """Soft-align rest targets; do not hold PWM (boot sequence moves later)."""
+        rest = arm_rest_deg()
         try:
             if hasattr(self, "initPos") and len(self.initPos) > ARM_CHANNEL:
-                self.initPos[ARM_CHANNEL] = arm_rest_deg()
+                self.initPos[ARM_CHANNEL] = rest
+            for attr in ("goalPos", "nowPos", "lastPos", "bufferPos"):
+                arr = getattr(self, attr, None)
+                if arr is not None and len(arr) > ARM_CHANNEL:
+                    arr[ARM_CHANNEL] = float(rest) if attr == "bufferPos" else int(rest)
+            # Align non-shoulder goals to initPos without energizing yet — boot
+            # choreography performs the real move after the reconnect grace window.
+            for i in range(min(len(getattr(self, "initPos", [])), 8)):
+                if i == ARM_CHANNEL:
+                    continue
+                for attr in ("goalPos", "nowPos", "lastPos"):
+                    arr = getattr(self, attr, None)
+                    if arr is not None and len(arr) > i:
+                        arr[i] = int(self.initPos[i])
+                buf = getattr(self, "bufferPos", None)
+                if buf is not None and len(buf) > i:
+                    buf[i] = float(self.initPos[i])
         except Exception:
-            logger.debug("initPos rewrite failed", exc_info=True)
+            logger.debug("moveInit soft-state rewrite failed", exc_info=True)
+        register_servo_ctrl(self)
+        apply_shoulder_endstops(self)
+        stop_all_wiggle()
+        # Intentionally skip orig_move_init PCA writes — holding mid/rest at
+        # import melts the shoulder. schedule_boot_init() drives rest later.
         try:
-            orig_move_init(self, *args, **kwargs)
-        finally:
-            register_servo_ctrl(self)
-            apply_shoulder_endstops(self)
-            # Never leave holding torque after vendor init.
-            release_servos(self)
-            logger.info(
-                "moveInit patched: shoulder initPos=%s° then PWM released",
-                arm_rest_deg(),
-            )
+            if hasattr(self, "pause"):
+                self.pause()
+            if hasattr(self, "scMode"):
+                self.scMode = "certain"
+        except Exception:
+            logger.debug("moveInit pause failed", exc_info=True)
+        release_servos(self)
+        logger.info(
+            "moveInit patched: soft rest=%s° (no PWM hold); boot init will move later",
+            rest,
+        )
 
     def single_servo_safe(self, ID, direcInput, speedSet):
         register_servo_ctrl(self)
@@ -424,6 +450,6 @@ def install_vendor_move_init_patch() -> None:
     _move_init_patched = True
     logger.info(
         "patched RPIservo.ServoCtrl.moveInit + singleServo + setPWM/set_angle "
-        "(shoulder rest=%s°, max clamped)",
+        "(shoulder rest=%s°, max clamped; PWM released after moveInit)",
         rest,
     )

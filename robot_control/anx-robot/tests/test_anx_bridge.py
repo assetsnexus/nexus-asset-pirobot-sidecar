@@ -619,9 +619,18 @@ def test_set_control_socket_clients_arms_and_releases(monkeypatch):
 
     servos.ensure_servos_armed(fake, park_arm=False)
     assert servos.servos_armed() is True
+    stops = []
+
+    class _Router:
+        def all_stop(self):
+            stops.append("stop")
+
+    bridge._router = _Router()  # noqa: SLF001
     bridge.set_control_socket_clients(0)
     assert servos.servos_armed() is False
+    assert stops == ["stop"]
     assert all(ch.duty_cycle == 0 for ch in fake.pwm_servo.channels)
+    bridge._router = None  # noqa: SLF001
 
 
 def test_status_lights_red_disconnected_blue_connected():
@@ -820,3 +829,101 @@ def test_power_history_series_uses_epoch_ms(monkeypatch):
     assert series[-1]["t"] > 1_000_000_000_000
     assert series[0]["t"] <= series[-1]["t"]
     assert abs(series[-1]["a"] - 0.40) < 1e-6
+
+
+def test_servo_boot_init_runs_then_idles(monkeypatch):
+    """Wait → blink → default pose → limp; reconnect cancels before move."""
+    import time
+
+    import anx_bridge.bridge as bridge
+    import anx_bridge.servo_boot as boot
+    import anx_bridge.servo_positions as sp
+    import anx_bridge.servos as servos
+
+    monkeypatch.setenv("ANX_BOOT_INIT", "true")
+    monkeypatch.setenv("ANX_SERVO_SLEW", "false")
+    bridge._status_lights = None  # noqa: SLF001
+    bridge._ws_client_count = 0  # noqa: SLF001
+    servos._armed = False  # noqa: SLF001
+    servos._primary_ctrl = None  # noqa: SLF001
+    servos._all_ctrls.clear()  # noqa: SLF001
+    sp._ctrl = None
+    sp._goals_ui.clear()
+    sp._actual_ui.clear()
+    sp._apply_wired = False
+
+    class _Ch:
+        def __init__(self):
+            self.duty_cycle = 0
+
+    class _Fake:
+        def __init__(self):
+            self.pwm_servo = type("P", (), {"channels": [_Ch() for _ in range(8)]})()
+            self.nowPos = [0, 90, 90, 90, 90]
+            self.initPos = list(self.nowPos)
+            self.minPos = [0] * 8
+            self.maxPos = [180] * 8
+            self.goalPos = list(self.nowPos)
+            self.lastPos = list(self.nowPos)
+            self.bufferPos = [float(x) for x in self.nowPos]
+            self.writes = []
+            self.scMode = "auto"
+            self.paused = 0
+
+        def setPWM(self, channel, deg):
+            self.nowPos[channel] = int(deg)
+            self.writes.append((channel, int(deg)))
+            self.pwm_servo.channels[channel].duty_cycle = 2000
+
+        def stopWiggle(self):
+            self.paused += 1
+
+        def pause(self):
+            self.paused += 1
+
+    fake = _Fake()
+    sp.bind_servo_ctrl(fake)
+    events = {"moved": 0, "idle": 0}
+
+    def _move():
+        events["moved"] += 1
+        sp.apply_rest_pose(ctrl=fake)
+
+    def _idle():
+        events["idle"] += 1
+        servos.release_servos(fake)
+
+    monkeypatch.setattr(boot, "_move_to_default", _move)
+    monkeypatch.setattr(boot, "_go_idle", _idle)
+    monkeypatch.setattr(boot, "_blink_boot", lambda: None)
+    monkeypatch.setattr(boot, "_control_connected", lambda: bridge.control_socket_connected())
+
+    assert boot.schedule_boot_init(delay_s=0.05, settle_s=0.05)
+    deadline = time.time() + 2.0
+    while time.time() < deadline and events["idle"] < 1:
+        time.sleep(0.02)
+    assert events["moved"] == 1
+    assert events["idle"] == 1
+    assert servos.servos_armed() is False
+    assert all(ch.duty_cycle == 0 for ch in fake.pwm_servo.channels)
+
+    # Reconnect during wait aborts before move.
+    events["moved"] = events["idle"] = 0
+    assert boot.schedule_boot_init(delay_s=0.4, settle_s=0.05)
+    time.sleep(0.05)
+    bridge.set_control_socket_clients(1)
+    deadline = time.time() + 1.5
+    while time.time() < deadline and boot._thread is not None and boot._thread.is_alive():
+        time.sleep(0.02)
+    assert events["moved"] == 0
+    bridge.set_control_socket_clients(0)
+
+
+def test_control_socket_connected_helper(monkeypatch):
+    import anx_bridge.bridge as bridge
+
+    bridge._status_lights = None  # noqa: SLF001
+    bridge._ws_client_count = 0  # noqa: SLF001
+    assert bridge.control_socket_connected() is False
+    bridge._ws_client_count = 2  # noqa: SLF001
+    assert bridge.control_socket_connected() is True

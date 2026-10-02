@@ -782,6 +782,13 @@ def _start_adeept_control_websocket(flask_webapp) -> None:
             "servos released after webServer import (idle until WS connect/control; arm rest init=%s°)",
             rest,
         )
+        try:
+            from anx_bridge.servo_boot import schedule_boot_init
+
+            # Wait briefly for a reconnecting UI, then blink → default → limp.
+            schedule_boot_init()
+        except Exception as boot_exc:
+            _log.warning("servo boot init not scheduled: %s", boot_exc)
     except Exception as exc:
         _log.warning("servo release after webServer import failed: %s", exc)
 
